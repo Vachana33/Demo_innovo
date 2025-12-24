@@ -1,14 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import FundingProgram
+from app.models import FundingProgram, User
 from app.schemas import FundingProgramCreate, FundingProgramResponse
+from app.dependencies import get_current_user
 from typing import List
 
 router = APIRouter()
 
 @router.post("/funding-programs", response_model=FundingProgramResponse, status_code=status.HTTP_201_CREATED)
-def create_funding_program(program_data: FundingProgramCreate, db: Session = Depends(get_db)):
+def create_funding_program(
+    program_data: FundingProgramCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """
     Create a new funding program.
     """
@@ -37,7 +42,10 @@ def create_funding_program(program_data: FundingProgramCreate, db: Session = Dep
         )
 
 @router.get("/funding-programs", response_model=List[FundingProgramResponse])
-def get_funding_programs(db: Session = Depends(get_db)):
+def get_funding_programs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """
     Get all funding programs.
     """
@@ -48,7 +56,8 @@ def get_funding_programs(db: Session = Depends(get_db)):
 def update_funding_program(
     funding_program_id: int,
     program_data: FundingProgramCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     """
     Update an existing funding program.
@@ -84,7 +93,8 @@ def update_funding_program(
 @router.delete("/funding-programs/{funding_program_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_funding_program(
     funding_program_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     """
     Delete a funding program.

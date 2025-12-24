@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../contexts/AuthContext";
+import { apiGet, apiPost, apiPut, apiDelete, apiUploadFile } from "../../utils/api";
 import styles from "./ProjectsPage.module.css";
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 type FundingProgram = {
   id: number;
@@ -22,6 +22,13 @@ type DocType = "vorhaben" | "vorkalkulation";
 
 export default function ProjectsPage() {
   const navigate = useNavigate();
+  const { logout } = useAuth();
+
+  // Handle logout: clear auth state and redirect to login
+  function handleLogout() {
+    logout(); // Clear token and auth state
+    navigate("/login", { replace: true }); // Redirect to login page
+  }
 
   // Funding programs from backend
   const [programs, setPrograms] = useState<FundingProgram[]>([]);
@@ -41,6 +48,12 @@ export default function ProjectsPage() {
   // Sidebar tab state
   const [activeTab, setActiveTab] =
     useState<"funding" | "without" | "collab">("funding");
+
+  // Reset search terms when switching tabs
+  useEffect(() => {
+    setProgramSearchTerm("");
+    setCompanySearchTerm("");
+  }, [activeTab]);
 
   // Dialog states
   const [showProgramDialog, setShowProgramDialog] = useState(false);
@@ -75,26 +88,48 @@ export default function ProjectsPage() {
   const [companyDocs, setCompanyDocs] = useState<FileList | null>(null);
   const [isCreatingProgram, setIsCreatingProgram] = useState(false);
 
+  // Search functionality - client-side filtering
+  const [programSearchTerm, setProgramSearchTerm] = useState("");
+  const [companySearchTerm, setCompanySearchTerm] = useState("");
+
+  // Filter programs based on search term (case-insensitive)
+  const filteredPrograms = programs.filter((p) => {
+    if (!programSearchTerm.trim()) return true;
+    const searchLower = programSearchTerm.toLowerCase();
+    return (
+      p.title.toLowerCase().includes(searchLower) ||
+      (p.website && p.website.toLowerCase().includes(searchLower))
+    );
+  });
+
+  // Filter companies based on search term (case-insensitive)
+  const filteredCompanies = companies.filter((c) => {
+    if (!companySearchTerm.trim()) return true;
+    const searchLower = companySearchTerm.toLowerCase();
+    return (
+      c.name.toLowerCase().includes(searchLower) ||
+      (c.website && c.website.toLowerCase().includes(searchLower))
+    );
+  });
+
   // Fetch funding programs on component mount
   useEffect(() => {
     async function fetchPrograms() {
       try {
         setIsLoadingPrograms(true);
-        const response = await fetch(`${API_BASE_URL}/funding-programs`);
-        if (response.ok) {
-          const data = await response.json();
-          setPrograms(data);
-        } else {
-          console.error("Failed to fetch funding programs");
-        }
-      } catch (error) {
+        const data = await apiGet<FundingProgram[]>("/funding-programs");
+        setPrograms(data);
+      } catch (error: any) {
         console.error("Error fetching funding programs:", error);
+        if (error.message.includes("Authentication required")) {
+          logout();
+        }
       } finally {
         setIsLoadingPrograms(false);
       }
     }
     fetchPrograms();
-  }, []);
+  }, [logout]);
 
   // Fetch companies when a funding program is selected
   // ONLY uses GET /funding-programs/{id}/companies
@@ -111,28 +146,25 @@ export default function ProjectsPage() {
       try {
         setIsLoadingCompanies(true);
         // ONLY fetch from program-specific endpoint
-        const response = await fetch(
-          `${API_BASE_URL}/funding-programs/${selectedProgramId}/companies`
+        const data = await apiGet<Company[]>(
+          `/funding-programs/${selectedProgramId}/companies`
         );
-        if (response.ok) {
-          const data = await response.json();
-          // REPLACE entire list - do NOT append or merge
-          setCompanies(data);
-          // Clear selected company when switching programs
-          setSelectedCompanyId(null);
-        } else {
-          console.error("Failed to fetch companies");
-          setCompanies([]);
-        }
-      } catch (error) {
+        // REPLACE entire list - do NOT append or merge
+        setCompanies(data);
+        // Clear selected company when switching programs
+        setSelectedCompanyId(null);
+      } catch (error: any) {
         console.error("Error fetching companies:", error);
         setCompanies([]);
+        if (error.message.includes("Authentication required")) {
+          logout();
+        }
       } finally {
         setIsLoadingCompanies(false);
       }
     }
     fetchCompanies();
-  }, [selectedProgramId]);
+  }, [selectedProgramId, logout]);
 
   // Navigate to editor page
   function handleOpenEditor(docType: DocType) {
@@ -151,27 +183,10 @@ export default function ProjectsPage() {
     setIsCreatingProgram(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/funding-programs`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          title: programTitle.trim(),
-          website: programWebsite.trim() || undefined,
-        }),
+      const createdProgram = await apiPost<FundingProgram>("/funding-programs", {
+        title: programTitle.trim(),
+        website: programWebsite.trim() || undefined,
       });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Failed to create funding program:", errorData);
-        alert("Failed to create funding program. Please try again.");
-        setIsCreatingProgram(false);
-        return;
-      }
-
-      // Get the newly created program from the response
-      const createdProgram = await response.json();
 
       // Update state with the new program from backend
       setPrograms((prev) => [...prev, createdProgram]);
@@ -183,9 +198,12 @@ export default function ProjectsPage() {
       setProgramTitle("");
       setProgramWebsite("");
       setShowProgramDialog(false);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error creating funding program:", error);
-      alert("Network error. Please check if the backend server is running.");
+      alert(error.message || "Failed to create funding program. Please try again.");
+      if (error.message.includes("Authentication required")) {
+        logout();
+      }
     } finally {
       setIsCreatingProgram(false);
     }
@@ -199,27 +217,13 @@ export default function ProjectsPage() {
     setIsUpdatingProgram(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/funding-programs/${editingProgramId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const updatedProgram = await apiPut<FundingProgram>(
+        `/funding-programs/${editingProgramId}`,
+        {
           title: programTitle.trim(),
           website: programWebsite.trim() || undefined,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Failed to update funding program:", errorData);
-        alert("Failed to update funding program. Please try again.");
-        setIsUpdatingProgram(false);
-        return;
-      }
-
-      // Get the updated program from the response
-      const updatedProgram = await response.json();
+        }
+      );
 
       // Replace program in list
       setPrograms((prev) =>
@@ -229,13 +233,10 @@ export default function ProjectsPage() {
       // Keep selection if same program
       if (selectedProgramId === editingProgramId) {
         // Refresh companies if program was selected
-        const companiesResponse = await fetch(
-          `${API_BASE_URL}/funding-programs/${editingProgramId}/companies`
+        const companiesData = await apiGet<Company[]>(
+          `/funding-programs/${editingProgramId}/companies`
         );
-        if (companiesResponse.ok) {
-          const companiesData = await companiesResponse.json();
-          setCompanies(companiesData);
-        }
+        setCompanies(companiesData);
       }
 
       // Clear form and close dialog
@@ -243,9 +244,12 @@ export default function ProjectsPage() {
       setProgramWebsite("");
       setEditingProgramId(null);
       setShowProgramDialog(false);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error updating funding program:", error);
-      alert("Network error. Please check if the backend server is running.");
+      alert(error.message || "Failed to update funding program. Please try again.");
+      if (error.message.includes("Authentication required")) {
+        logout();
+      }
     } finally {
       setIsUpdatingProgram(false);
     }
@@ -258,17 +262,7 @@ export default function ProjectsPage() {
     setIsDeletingProgram(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/funding-programs/${deletingProgramId}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Failed to delete funding program:", errorData);
-        alert("Failed to delete funding program. Please try again.");
-        setIsDeletingProgram(false);
-        return;
-      }
+      await apiDelete(`/funding-programs/${deletingProgramId}`);
 
       // Remove program from list
       setPrograms((prev) => prev.filter((p) => p.id !== deletingProgramId));
@@ -282,9 +276,12 @@ export default function ProjectsPage() {
 
       // Close confirmation dialog
       setDeletingProgramId(null);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error deleting funding program:", error);
-      alert("Network error. Please check if the backend server is running.");
+      alert(error.message || "Failed to delete funding program. Please try again.");
+      if (error.message.includes("Authentication required")) {
+        logout();
+      }
     } finally {
       setIsDeletingProgram(false);
     }
@@ -298,31 +295,22 @@ export default function ProjectsPage() {
     setIsCreatingCompany(true);
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/funding-programs/${selectedProgramId}/companies`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            name: companyName.trim(),
-            website: companyWebsite.trim() || undefined,
-            audio_path: companyAudio?.name || undefined,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Failed to create company:", errorData);
-        alert("Failed to create company. Please try again.");
-        setIsCreatingCompany(false);
-        return;
+      // First, upload audio file if provided
+      let audioPath: string | undefined = undefined;
+      if (companyAudio) {
+        const uploadData = await apiUploadFile("/upload-audio", companyAudio);
+        audioPath = uploadData.audio_path;
       }
 
-      // Get the newly created company from the response
-      const createdCompany = await response.json();
+      // Then create the company with the audio path
+      const createdCompany = await apiPost<Company>(
+        `/funding-programs/${selectedProgramId}/companies`,
+        {
+          name: companyName.trim(),
+          website: companyWebsite.trim() || undefined,
+          audio_path: audioPath,
+        }
+      );
 
       // Add to current companies list (from backend response)
       setCompanies((prev) => [...prev, createdCompany]);
@@ -337,9 +325,12 @@ export default function ProjectsPage() {
       setCompanyDocs(null);
       setShowCompanyDialog(false);
       setShowCompanyMenu(false);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error creating company:", error);
-      alert("Network error. Please check if the backend server is running.");
+      alert(error.message || "Failed to create company. Please try again.");
+      if (error.message.includes("Authentication required")) {
+        logout();
+      }
     } finally {
       setIsCreatingCompany(false);
     }
@@ -352,23 +343,20 @@ export default function ProjectsPage() {
 
       try {
         setIsLoadingAllCompanies(true);
-        const response = await fetch(`${API_BASE_URL}/companies`);
-        if (response.ok) {
-          const data = await response.json();
-          setAllCompanies(data);
-        } else {
-          console.error("Failed to fetch all companies");
-          setAllCompanies([]);
-        }
-      } catch (error) {
+        const data = await apiGet<Company[]>("/companies");
+        setAllCompanies(data);
+      } catch (error: any) {
         console.error("Error fetching all companies:", error);
         setAllCompanies([]);
+        if (error.message.includes("Authentication required")) {
+          logout();
+        }
       } finally {
         setIsLoadingAllCompanies(false);
       }
     }
     fetchAllCompanies();
-  }, [showImportDialog]);
+  }, [showImportDialog, logout]);
 
   // Import an existing company into the funding program
   async function handleImportCompany(companyId: number) {
@@ -383,23 +371,9 @@ export default function ProjectsPage() {
     setIsImportingCompany(true);
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/funding-programs/${selectedProgramId}/companies/${companyId}`,
-        {
-          method: "POST",
-        }
+      const importedCompany = await apiPost<Company>(
+        `/funding-programs/${selectedProgramId}/companies/${companyId}`
       );
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Failed to import company:", errorData);
-        alert("Failed to import company. Please try again.");
-        setIsImportingCompany(false);
-        return;
-      }
-
-      // Get the imported company from the response
-      const importedCompany = await response.json();
 
       // Add to current companies list (from backend response)
       setCompanies((prev) => [...prev, importedCompany]);
@@ -410,9 +384,12 @@ export default function ProjectsPage() {
       // Close import dialog
       setShowImportDialog(false);
       setShowCompanyMenu(false);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error importing company:", error);
-      alert("Network error. Please check if the backend server is running.");
+      alert(error.message || "Failed to import company. Please try again.");
+      if (error.message.includes("Authentication required")) {
+        logout();
+      }
     } finally {
       setIsImportingCompany(false);
     }
@@ -426,28 +403,22 @@ export default function ProjectsPage() {
     setIsUpdatingCompany(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/companies/${editingCompanyId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          name: companyName.trim(),
-          website: companyWebsite.trim() || undefined,
-          audio_path: companyAudio?.name || undefined,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Failed to update company:", errorData);
-        alert("Failed to update company. Please try again.");
-        setIsUpdatingCompany(false);
-        return;
+      // First, upload audio file if provided
+      let audioPath: string | undefined = undefined;
+      if (companyAudio) {
+        const uploadData = await apiUploadFile("/upload-audio", companyAudio);
+        audioPath = uploadData.audio_path;
       }
 
-      // Get the updated company from the response
-      const updatedCompany = await response.json();
+      // Then update the company with the audio path
+      const updatedCompany = await apiPut<Company>(
+        `/companies/${editingCompanyId}`,
+        {
+          name: companyName.trim(),
+          website: companyWebsite.trim() || undefined,
+          audio_path: audioPath,
+        }
+      );
 
       // Replace company in list
       setCompanies((prev) =>
@@ -466,9 +437,12 @@ export default function ProjectsPage() {
       setCompanyDocs(null);
       setEditingCompanyId(null);
       setShowCompanyDialog(false);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error updating company:", error);
-      alert("Network error. Please check if the backend server is running.");
+      alert(error.message || "Failed to update company. Please try again.");
+      if (error.message.includes("Authentication required")) {
+        logout();
+      }
     } finally {
       setIsUpdatingCompany(false);
     }
@@ -481,17 +455,7 @@ export default function ProjectsPage() {
     setIsDeletingCompany(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/companies/${deletingCompanyId}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("Failed to delete company:", errorData);
-        alert("Failed to delete company. Please try again.");
-        setIsDeletingCompany(false);
-        return;
-      }
+      await apiDelete(`/companies/${deletingCompanyId}`);
 
       // Remove company from list
       setCompanies((prev) => prev.filter((c) => c.id !== deletingCompanyId));
@@ -503,9 +467,12 @@ export default function ProjectsPage() {
 
       // Close confirmation dialog
       setDeletingCompanyId(null);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error deleting company:", error);
-      alert("Network error. Please check if the backend server is running.");
+      alert(error.message || "Failed to delete company. Please try again.");
+      if (error.message.includes("Authentication required")) {
+        logout();
+      }
     } finally {
       setIsDeletingCompany(false);
     }
@@ -579,11 +546,22 @@ export default function ProjectsPage() {
         {activeTab === "funding" && (
           <>
             <header className={styles.header}>
-              <h1 className={styles.title}>Innovo Funding Workspace</h1>
-              <p className={styles.subtitle}>
-                Select a funding program, choose a company, then generate
-                documents.
-              </p>
+              <div className={styles.headerContent}>
+                <div>
+                  <h1 className={styles.title}>Innovo Funding Workspace</h1>
+                  <p className={styles.subtitle}>
+                    Select a funding program, choose a company, then generate
+                    documents.
+                  </p>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className={styles.logoutButton}
+                  title="Logout"
+                >
+                  Logout
+                </button>
+              </div>
             </header>
 
             <div className={styles.layout}>
@@ -598,13 +576,33 @@ export default function ProjectsPage() {
                     + New Funding Program
                   </button>
                 </div>
+                {/* Search input for funding programs */}
+                <div style={{ padding: "0.5rem", marginBottom: "0.5rem" }}>
+                  <input
+                    type="text"
+                    placeholder="Search programs..."
+                    value={programSearchTerm}
+                    onChange={(e) => setProgramSearchTerm(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: "0.5rem",
+                      border: "1px solid var(--brand-border)",
+                      borderRadius: "4px",
+                      fontSize: "0.9rem",
+                    }}
+                  />
+                </div>
                 <div className={styles.programList}>
                   {isLoadingPrograms ? (
                     <div>Loading programs...</div>
-                  ) : programs.length === 0 ? (
-                    <div>No funding programs found.</div>
+                  ) : filteredPrograms.length === 0 ? (
+                    <div>
+                      {programs.length === 0
+                        ? "No funding programs found."
+                        : `No programs match "${programSearchTerm}"`}
+                    </div>
                   ) : (
-                    programs.map((p) => (
+                    filteredPrograms.map((p) => (
                       <div
                         key={p.id}
                         className={`${styles.programItem} ${
@@ -708,13 +706,33 @@ export default function ProjectsPage() {
                       )}
                     </div>
                   </div>
+                  {/* Search input for companies */}
+                  <div style={{ padding: "0.5rem", marginBottom: "0.5rem" }}>
+                    <input
+                      type="text"
+                      placeholder="Search companies..."
+                      value={companySearchTerm}
+                      onChange={(e) => setCompanySearchTerm(e.target.value)}
+                      style={{
+                        width: "100%",
+                        padding: "0.5rem",
+                        border: "1px solid var(--brand-border)",
+                        borderRadius: "4px",
+                        fontSize: "0.9rem",
+                      }}
+                    />
+                  </div>
                   <div className={styles.companyList}>
                     {isLoadingCompanies ? (
                       <div>Loading companies...</div>
-                    ) : companies.length === 0 ? (
-                      <div>No companies found for this funding program.</div>
+                    ) : filteredCompanies.length === 0 ? (
+                      <div>
+                        {companies.length === 0
+                          ? "No companies found for this funding program."
+                          : `No companies match "${companySearchTerm}"`}
+                      </div>
                     ) : (
-                      companies.map((c) => (
+                      filteredCompanies.map((c) => (
                         <div
                           key={c.id}
                           className={`${styles.companyItem} ${
@@ -813,10 +831,21 @@ export default function ProjectsPage() {
         {activeTab === "without" && (
           <>
             <header className={styles.header}>
-              <h1 className={styles.title}>Add Company Without Program</h1>
-              <p className={styles.subtitle}>
-                Create or select a company without linking to any funding program.
-              </p>
+              <div className={styles.headerContent}>
+                <div>
+                  <h1 className={styles.title}>Add Company Without Program</h1>
+                  <p className={styles.subtitle}>
+                    Create or select a company without linking to any funding program.
+                  </p>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className={styles.logoutButton}
+                  title="Logout"
+                >
+                  Logout
+                </button>
+              </div>
             </header>
 
             <div className={styles.layout}>
@@ -911,10 +940,21 @@ export default function ProjectsPage() {
         {activeTab === "collab" && (
           <>
             <header className={styles.header}>
-              <h1 className={styles.title}>Collaborate</h1>
-              <p className={styles.subtitle}>
-                Collaboration features (coming soon).
-              </p>
+              <div className={styles.headerContent}>
+                <div>
+                  <h1 className={styles.title}>Collaborate</h1>
+                  <p className={styles.subtitle}>
+                    Collaboration features (coming soon).
+                  </p>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className={styles.logoutButton}
+                  title="Logout"
+                >
+                  Logout
+                </button>
+              </div>
             </header>
             <div className={styles.layout}>
               <p className={styles.collabPlaceholder}>

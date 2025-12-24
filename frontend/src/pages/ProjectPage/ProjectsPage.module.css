@@ -19,6 +19,24 @@
     font-size: 1.4rem;
     color: var(--brand-gold-dark);
   }
+
+  .logoutButton {
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    border: 1px solid var(--brand-border);
+    background-color: #fff;
+    font-size: 0.9rem;
+    cursor: pointer;
+    color: var(--brand-text-dark);
+    transition: background-color 0.2s, border-color 0.2s;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .logoutButton:hover {
+    background-color: var(--brand-gold-light);
+    border-color: var(--brand-gold);
+  }
   
   .sidebarItem {
     width: 100%;
@@ -53,6 +71,13 @@
   /* Header section */
   .header {
     margin-bottom: 2rem;
+  }
+
+  .headerContent {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
   }
   
   .title {

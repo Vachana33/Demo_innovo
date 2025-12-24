@@ -11,7 +11,12 @@ pip install -r requirements.txt
 
 2. Run the server:
 ```bash
+# Local development
 uvicorn main:app --reload --port 8000
+
+# Production (Render compatible)
+# Uses PORT environment variable if set, otherwise defaults to 8000
+uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
 ```
 
 The API will be available at `http://localhost:8000`
@@ -52,5 +57,13 @@ Authenticate and log in.
 
 ## Database
 
-Uses SQLite by default (stored in `innovo.db`). To use PostgreSQL, set the `DATABASE_URL` environment variable.
+**Local Development:**
+- Uses SQLite by default (stored in `innovo.db`)
+- No configuration needed
+
+**Production (Render):**
+- Requires PostgreSQL
+- Set `DATABASE_URL` environment variable to PostgreSQL connection string
+- Run migrations: `alembic upgrade head`
+- The app automatically configures connection pooling and SSL for PostgreSQL
 

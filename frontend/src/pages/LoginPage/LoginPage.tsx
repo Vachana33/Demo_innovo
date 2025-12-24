@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../contexts/AuthContext";
 import styles from "./LoginPage.module.css";
 
 import logo from "../../assets/innovo-logo.png";
@@ -18,6 +19,17 @@ function isValidEmail(email: string): boolean {
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const { login, isAuthenticated } = useAuth();
+  
+  // Redirect if already authenticated
+  // This prevents authenticated users from accessing login page
+  // MUST be in useEffect to avoid updating BrowserRouter during render
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate("/projects", { replace: true });
+    }
+  }, [isAuthenticated, navigate]);
+  
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -81,8 +93,18 @@ export default function LoginPage() {
       // Handle success based on mode
       if (data.success) {
         if (mode === "login") {
-          // Login successful - navigate to projects
-          navigate("/projects");
+          // Login successful - store token
+          // Backend now returns TokenResponse with access_token
+          if (data.access_token) {
+            // Store token in context and localStorage
+            // State update will trigger useEffect to navigate
+            login(data.access_token);
+            setIsLoading(false);
+            // Navigation will be handled by useEffect when isAuthenticated becomes true
+          } else {
+            setError("Login successful but no token received. Please try again.");
+            setIsLoading(false);
+          }
         } else {
           // Registration successful - show message, clear ALL fields, switch to login
           setSuccess("Account created successfully. Please log in with your credentials.");

@@ -29,6 +29,29 @@ class AuthResponse(BaseModel):
     success: bool
     message: str
 
+class TokenResponse(BaseModel):
+    """Response model for login endpoint - includes JWT token"""
+    access_token: str
+    token_type: str = "bearer"
+    success: bool
+    message: str
+
+class PasswordResetRequest(BaseModel):
+    """Request model for password reset initiation"""
+    email: str
+
+class PasswordReset(BaseModel):
+    """Request model for password reset completion"""
+    token: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password_length(cls, v: str) -> str:
+        if len(v) < 6:
+            raise ValueError("Password must be at least 6 characters")
+        return v
+
 # Funding Program Schemas
 class FundingProgramCreate(BaseModel):
     title: str
@@ -54,6 +77,10 @@ class CompanyResponse(BaseModel):
     name: str
     website: Optional[str] = None
     audio_path: Optional[str] = None
+    website_text: Optional[str] = None
+    transcript_text: Optional[str] = None
+    processing_status: str = "pending"
+    processing_error: Optional[str] = None
     created_at: datetime
 
     class Config:

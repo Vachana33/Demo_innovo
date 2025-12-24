@@ -9,6 +9,9 @@ class User(Base):
     email = Column(String, primary_key=True, index=True)
     password_hash = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # Password reset fields - stored as hashed token for security
+    reset_token_hash = Column(String, nullable=True)  # Hashed reset token
+    reset_token_expiry = Column(DateTime(timezone=True), nullable=True)  # Token expiration time
 
 class FundingProgram(Base):
     __tablename__ = "funding_programs"
@@ -32,6 +35,10 @@ class Company(Base):
     name = Column(String, nullable=False)
     website = Column(String, nullable=True)
     audio_path = Column(String, nullable=True)
+    website_text = Column(String, nullable=True)  # Crawled website content
+    transcript_text = Column(String, nullable=True)  # Audio transcript
+    processing_status = Column(String, nullable=True, server_default="pending")  # "pending", "processing", "done", "failed"
+    processing_error = Column(String, nullable=True)  # Error message if processing failed
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Many-to-many relationship with funding programs
