@@ -7,7 +7,7 @@
  * - Token expiration is checked on each API call
  * - Auth state is checked on app initialization
  */
-import { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
 
 interface AuthContextType {
   token: string | null;

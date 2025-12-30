@@ -1,12 +1,11 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
+import { apiPost } from "../../utils/api";
 import styles from "./LoginPage.module.css";
 
 import logo from "../../assets/innovo-logo.png";
 import bgImage from "../../assets/login-bg.jpg";
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 function isValidEmail(email: string): boolean {
   const pattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -59,36 +58,10 @@ export default function LoginPage() {
 
     try {
       const endpoint = mode === "login" ? "/auth/login" : "/auth/register";
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: email.toLowerCase(),
-          password: password,
-        }),
+      const data = await apiPost<any>(endpoint, {
+        email: email.toLowerCase(),
+        password: password,
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        // FastAPI returns errors in 'detail' field
-        const errorMessage = data.detail || data.message || "An error occurred. Please try again.";
-        
-        // Handle error responses
-        if (response.status === 409 || response.status === 400) {
-          setError(errorMessage);
-        } else if (response.status === 404) {
-          setError(errorMessage);
-        } else if (response.status === 401) {
-          setError(errorMessage);
-        } else {
-          setError(errorMessage);
-        }
-        setIsLoading(false);
-        return;
-      }
 
       // Handle success based on mode
       if (data.success) {
@@ -117,11 +90,10 @@ export default function LoginPage() {
         setError(data.message || "An error occurred. Please try again.");
         setIsLoading(false);
       }
-    } catch (err) {
-      // Network error or other exception
-      setError(
-        "Network error. Please check if the backend server is running."
-      );
+    } catch (err: any) {
+      // Network error or API error (apiPost throws on non-ok responses)
+      const errorMessage = err?.message || "Network error. Please check if the backend server is running.";
+      setError(errorMessage);
       setIsLoading(false);
     }
   }

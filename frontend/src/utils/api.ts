@@ -4,7 +4,20 @@
  * Security: Automatically includes JWT token in Authorization header.
  * Handles token expiration and redirects to login if unauthorized.
  */
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+// Get API base URL from environment variable
+const envApiUrl = import.meta.env.VITE_API_URL;
+const isProduction = import.meta.env.PROD;
+
+// Validate environment variable in production
+if (isProduction && !envApiUrl) {
+  console.error(
+    "⚠️ VITE_API_URL is not set in production! API calls will fail."
+  );
+}
+
+// Export API_BASE_URL for use in other files (e.g., LoginPage)
+export const API_BASE_URL = envApiUrl || "http://localhost:8000";
 
 /**
  * Get the stored authentication token.
@@ -28,9 +41,9 @@ export async function apiRequest<T = any>(
   const token = getAuthToken();
 
   // Build headers
-  const headers: HeadersInit = {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...options.headers,
+    ...(options.headers as Record<string, string>),
   };
 
   // Add Authorization header if token exists
@@ -127,7 +140,7 @@ export async function apiUploadFile(
     });
   }
 
-  const headers: HeadersInit = {};
+  const headers: Record<string, string> = {};
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
@@ -161,7 +174,7 @@ export async function apiUploadFile(
  */
 export async function apiDownloadFile(endpoint: string): Promise<Response> {
   const token = getAuthToken();
-  const headers: HeadersInit = {};
+  const headers: Record<string, string> = {};
 
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;

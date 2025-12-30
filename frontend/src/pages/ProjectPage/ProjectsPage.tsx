@@ -85,6 +85,7 @@ export default function ProjectsPage() {
   const [companyName, setCompanyName] = useState("");
   const [companyWebsite, setCompanyWebsite] = useState("");
   const [companyAudio, setCompanyAudio] = useState<File | null>(null);
+  // @ts-ignore - companyDocs is set but not currently read (reserved for future use)
   const [companyDocs, setCompanyDocs] = useState<FileList | null>(null);
   const [isCreatingProgram, setIsCreatingProgram] = useState(false);
 
