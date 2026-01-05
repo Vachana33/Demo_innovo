@@ -11,7 +11,9 @@ import json
 import re
 import logging
 import io
+import traceback
 from openai import OpenAI
+import openai
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +218,38 @@ Do NOT include any markdown formatting, explanations, or text outside the JSON o
     # Call OpenAI
     # Note: OpenAI v1+ does not support proxies in constructor
     # Only pass api_key explicitly - do not pass proxies, http_client, or other proxy-related parameters
+    
+    # TEMP DEBUG — REMOVE AFTER PROXY ROOT CAUSE IS FOUND
+    # Log OpenAI class and module info
+    logger.warning("=== TEMP DEBUG: OpenAI Client Initialization (documents.py) ===")
+    logger.warning(f"OpenAI class repr: {repr(OpenAI)}")
+    logger.warning(f"OpenAI module: {OpenAI.__module__}")
+    logger.warning(f"OpenAI version: {openai.__version__}")
+    
+    # Log proxy-related environment variables (existence only, not values)
+    proxy_env_vars = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]
+    for var in proxy_env_vars:
+        exists = os.getenv(var) is not None
+        logger.warning(f"Environment variable {var} exists: {exists}")
+    
+    # Prepare kwargs for logging
+    kwargs = {"api_key": api_key}
+    logger.warning(f"OpenAI constructor kwargs keys: {list(kwargs.keys())}")
+    
+    # Defensive check: look for any proxy-related keys in kwargs
+    proxy_keywords = ["proxy", "proxies"]
+    found_proxy_keys = [k for k in kwargs.keys() if any(pk in str(k).lower() for pk in proxy_keywords)]
+    if found_proxy_keys:
+        logger.error(f"CRITICAL: Found proxy-related keys in kwargs: {found_proxy_keys}")
+        logger.error(f"Full kwargs: {kwargs}")
+        logger.error("Stack trace:")
+        logger.error(traceback.format_stack())
+    else:
+        logger.warning("No proxy-related keys found in kwargs")
+    
+    logger.warning("=== END TEMP DEBUG ===")
+    # END TEMP DEBUG
+    
     try:
         client = OpenAI(api_key=api_key)
         
