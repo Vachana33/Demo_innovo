@@ -274,7 +274,9 @@ Do NOT include any markdown formatting, explanations, or text outside the JSON o
         logger.info(f"OpenAI response received for document {document_id}")
         
     except Exception as e:
+        # Log full traceback to identify root cause
         logger.error(f"OpenAI API error for document {document_id}: {str(e)}")
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"OpenAI API error: {str(e)}"
