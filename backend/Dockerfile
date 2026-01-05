@@ -20,3 +20,4 @@ EXPOSE 8000
 # PORT environment variable will be set by Render (defaults to 8000 if not set)
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
+

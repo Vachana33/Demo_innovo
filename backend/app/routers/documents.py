@@ -214,6 +214,8 @@ Do NOT include any markdown formatting, explanations, or text outside the JSON o
         )
     
     # Call OpenAI
+    # Note: OpenAI v1+ does not support proxies in constructor
+    # Only pass api_key explicitly - do not pass proxies, http_client, or other proxy-related parameters
     try:
         client = OpenAI(api_key=api_key)
         

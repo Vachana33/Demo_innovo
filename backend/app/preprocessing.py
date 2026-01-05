@@ -148,6 +148,8 @@ def transcribe_audio(audio_path: str) -> Optional[str]:
             logger.error(f"Audio file does not exist: audio_path={audio_path}")
             return None
         
+        # Note: OpenAI v1+ does not support proxies in constructor
+        # Only pass api_key explicitly - do not pass proxies, http_client, or other proxy-related parameters
         client = OpenAI(api_key=api_key)
         
         with open(audio_path, "rb") as audio_file:

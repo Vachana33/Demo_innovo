@@ -46,12 +46,14 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Innovo Agent API", version="1.0.0")
 
 # CORS configuration - environment-driven
+# Production: Set FRONTEND_ORIGIN environment variable to your frontend URL (e.g., https://demo-innovo-frontend.onrender.com)
+# Development: If FRONTEND_ORIGIN is not set, falls back to localhost origins for local development
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN")
 if FRONTEND_ORIGIN:
-    # Production: use single origin from environment
+    # Production: use single origin from environment variable
     cors_origins = [FRONTEND_ORIGIN]
 else:
-    # Development: default localhost origins
+    # Development: default localhost origins for local development
     cors_origins = [
         "http://localhost:3000",
         "http://localhost:5173",  # Vite default port
