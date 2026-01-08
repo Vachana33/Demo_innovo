@@ -10,8 +10,12 @@ class UserCreate(BaseModel):
     @classmethod
     def validate_email_domain(cls, v: str) -> str:
         v_lower = v.lower()
-        if not (v_lower.endswith("@innovo-consulting.de") or v_lower.endswith("@gmail.com")):
-            raise ValueError("Email must end with @innovo-consulting.de or @gmail.com")
+        # Explicitly allow donotreply@aiio.de
+        if v_lower == "donotreply@aiio.de":
+            return v_lower
+        # Allow emails ending with @innovo-consulting.de or @aiio.de
+        if not (v_lower.endswith("@innovo-consulting.de") or v_lower.endswith("@aiio.de")):
+            raise ValueError("Email must end with @innovo-consulting.de or @aiio.de")
         return v_lower
 
     @field_validator("password")

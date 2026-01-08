@@ -10,9 +10,13 @@ import bgImage from "../../assets/login-bg.jpg";
 function isValidEmail(email: string): boolean {
   const pattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!pattern.test(email)) return false;
+  const emailLower = email.toLowerCase();
+  // Explicitly allow donotreply@aiio.de
+  if (emailLower === "donotreply@aiio.de") return true;
+  // Allow emails ending with @innovo-consulting.de or @aiio.de
   return (
-    email.endsWith("@innovo-consulting.de") ||
-    email.endsWith("@gmail.com")
+    emailLower.endsWith("@innovo-consulting.de") ||
+    emailLower.endsWith("@aiio.de")
   );
 }
 
@@ -44,7 +48,7 @@ export default function LoginPage() {
     // Client-side validation
     if (!isValidEmail(email)) {
       setError(
-        "Email must end with @innovo-consulting.de or @gmail.com"
+        "Email must end with @innovo-consulting.de or @aiio.de"
       );
       return;
     }
@@ -172,7 +176,7 @@ export default function LoginPage() {
         </form>
 
         <p className={styles.note}>
-          Only @innovo-consulting.de or @gmail.com emails are allowed.
+          Only @innovo-consulting.de or @aiio.de emails are allowed.
         </p>
       </div>
     </div>
