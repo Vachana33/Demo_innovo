@@ -10,15 +10,15 @@ ENV_PATH = BASE_DIR / ".env"
 if ENV_PATH.exists():
     load_dotenv(dotenv_path=ENV_PATH)
 
+# Environment validation - fail early with clear errors
+import logging
+logger = logging.getLogger(__name__)
+
 # Optional debug logging (only if DEBUG_ENV_LOG=true)
 if os.getenv("DEBUG_ENV_LOG", "").lower() == "true":
     logger.info(f"ENV FILE USED: {ENV_PATH if ENV_PATH.exists() else 'None (using system env)'}")
     logger.info(f"OPENAI KEY FOUND: {bool(os.getenv('OPENAI_API_KEY'))}")
     logger.info(f"JWT SECRET KEY FOUND: {bool(os.getenv('JWT_SECRET_KEY'))}")
-
-# Environment validation - fail early with clear errors
-import logging
-logger = logging.getLogger(__name__)
 
 # JWT_SECRET_KEY is required (no fallback for security)
 if not os.getenv("JWT_SECRET_KEY"):

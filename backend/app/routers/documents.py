@@ -42,6 +42,144 @@ router = APIRouter()
 # - /chat ONLY calls _generate_section_content()
 # ============================================================================
 
+def _safe_get_document_by_id(document_id: int, db: Session) -> Optional[Document]:
+    """
+    Safely query Document by ID, handling missing chat_history column gracefully.
+    Returns Document object or None if not found.
+    """
+    # #region agent log
+    try:
+        import time
+        with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1,H2,H3","location":"documents.py:_safe_get_document_by_id:entry","message":"Querying document by ID","data":{"document_id":document_id},"timestamp":int(time.time()*1000)}) + '\n')
+    except:
+        pass  # Logging failure should not break the function
+    # #endregion
+    
+    try:
+        # First try normal query
+        document = db.query(Document).filter(Document.id == document_id).first()
+        # #region agent log
+        try:
+            import time
+            with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H4","location":"documents.py:_safe_get_document_by_id:normal_query","message":"Normal query succeeded","data":{"document_id":document_id,"found":document is not None},"timestamp":int(time.time()*1000)}) + '\n')
+        except:
+            pass
+        # #endregion
+        if document:
+            # Ensure chat_history is initialized
+            if hasattr(document, 'chat_history') and document.chat_history is None:
+                document.chat_history = []
+            elif not hasattr(document, 'chat_history'):
+                document.chat_history = []
+        return document
+    except ProgrammingError as e:
+        # #region agent log
+        try:
+            import time
+            with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1,H2,H3","location":"documents.py:_safe_get_document_by_id:programming_error","message":"ProgrammingError caught","data":{"document_id":document_id,"error":str(e)[:200]},"timestamp":int(time.time()*1000)}) + '\n')
+        except:
+            pass
+        # #endregion
+        
+        # CRITICAL: Rollback transaction immediately
+        db.rollback()
+        
+        # Check if error is about chat_history column not existing
+        error_str = str(e.orig) if hasattr(e, 'orig') else str(e)
+        if 'chat_history' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
+            logger.warning(f"chat_history column does not exist. Using workaround for document {document_id}")
+            # Try using defer to exclude chat_history from query
+            try:
+                document = db.query(Document).options(defer(Document.chat_history)).filter(
+                    Document.id == document_id
+                ).first()
+                # #region agent log
+                try:
+                    import time
+                    with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H4","location":"documents.py:_safe_get_document_by_id:defer_success","message":"Defer approach succeeded","data":{"document_id":document_id,"found":document is not None},"timestamp":int(time.time()*1000)}) + '\n')
+                except:
+                    pass
+                # #endregion
+                if document:
+                    # Set chat_history to empty list in memory
+                    try:
+                        document.chat_history = []
+                    except:
+                        pass
+                return document
+            except Exception as defer_error:
+                # If defer also fails, rollback and use raw SQL as last resort
+                db.rollback()
+                logger.warning(f"Defer approach also failed: {str(defer_error)}. Using raw SQL workaround.")
+                # #region agent log
+                try:
+                    import time
+                    with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H5","location":"documents.py:_safe_get_document_by_id:defer_failed","message":"Defer failed, trying raw SQL","data":{"document_id":document_id,"error":str(defer_error)[:200]},"timestamp":int(time.time()*1000)}) + '\n')
+                except:
+                    pass
+                # #endregion
+                from sqlalchemy import text
+                try:
+                    result = db.execute(
+                        text("""
+                            SELECT id, company_id, type, content_json, updated_at 
+                            FROM documents 
+                            WHERE id = :doc_id 
+                            LIMIT 1
+                        """),
+                        {"doc_id": document_id}
+                    )
+                    row = result.first()
+                    if row:
+                        # Parse content_json if it's a string
+                        content_json = row[3]
+                        if isinstance(content_json, str):
+                            content_json = json.loads(content_json)
+                        
+                        # Create Document object from raw SQL result
+                        document = Document(
+                            id=row[0],
+                            company_id=row[1],
+                            type=row[2],
+                            content_json=content_json,
+                            updated_at=row[4]
+                        )
+                        # Make it transient so SQLAlchemy doesn't try to track it
+                        make_transient(document)
+                        # Set chat_history in memory (not persisted, column doesn't exist)
+                        document.chat_history = []
+                        # #region agent log
+                        try:
+                            import time
+                            with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+                                f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H5","location":"documents.py:_safe_get_document_by_id:raw_sql_success","message":"Raw SQL workaround succeeded","data":{"document_id":document_id},"timestamp":int(time.time()*1000)}) + '\n')
+                        except:
+                            pass
+                        # #endregion
+                        return document
+                    return None
+                except Exception as sql_error:
+                    db.rollback()
+                    logger.error(f"Raw SQL workaround also failed: {str(sql_error)}")
+                    # #region agent log
+                    try:
+                        import time
+                        with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H5","location":"documents.py:_safe_get_document_by_id:raw_sql_failed","message":"Raw SQL workaround failed","data":{"document_id":document_id,"error":str(sql_error)[:200]},"timestamp":int(time.time()*1000)}) + '\n')
+                    except:
+                        pass
+                    # #endregion
+                    return None
+        else:
+            # Re-raise if it's a different ProgrammingError
+            logger.error(f"Unexpected ProgrammingError: {str(e)}", exc_info=True)
+            raise
+
 @router.get(
     "/documents/{company_id}/vorhabensbeschreibung",
     response_model=DocumentResponse
@@ -314,7 +452,16 @@ def update_document(
     """
     Update a document's content.
     """
-    document = db.query(Document).filter(Document.id == document_id).first()
+    # #region agent log
+    try:
+        import time
+        with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"documents.py:update_document:entry","message":"Updating document","data":{"document_id":document_id},"timestamp":int(time.time()*1000)}) + '\n')
+    except:
+        pass
+    # #endregion
+    
+    document = _safe_get_document_by_id(document_id, db)
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -685,8 +832,17 @@ def generate_content(
     - Call _generate_section_content() (that's for editing only)
     - Be used for modifying existing content (use /chat instead)
     """
+    # #region agent log
+    try:
+        import time
+        with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"documents.py:generate_content:entry","message":"Generating content","data":{"document_id":document_id},"timestamp":int(time.time()*1000)}) + '\n')
+    except:
+        pass
+    # #endregion
+    
     # Load document
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = _safe_get_document_by_id(document_id, db)
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1802,8 +1958,17 @@ def chat_with_document(
     - Call _generate_batch_content() (that's for initial generation only)
     - Be used for creating initial content (use /generate-content instead)
     """
+    # #region agent log
+    try:
+        import time
+        with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"documents.py:chat_with_document:entry","message":"Chat with document","data":{"document_id":document_id},"timestamp":int(time.time()*1000)}) + '\n')
+    except:
+        pass
+    # #endregion
+    
     # Load document
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = _safe_get_document_by_id(document_id, db)
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2097,8 +2262,17 @@ def confirm_chat_edit(
     Apply confirmed edit to a section.
     This endpoint is called when user approves a suggested edit from the preview.
     """
+    # #region agent log
+    try:
+        import time
+        with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"documents.py:confirm_chat_edit:entry","message":"Confirming chat edit","data":{"document_id":document_id},"timestamp":int(time.time()*1000)}) + '\n')
+    except:
+        pass
+    # #endregion
+    
     # Load document
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = _safe_get_document_by_id(document_id, db)
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -2242,8 +2416,17 @@ def export_document(
     """
     Export document as PDF or DOCX file.
     """
+    # #region agent log
+    try:
+        import time
+        with open('/Users/vachana.visweswaraiah/Documents/GitHub/Demo_innovo/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"documents.py:export_document:entry","message":"Exporting document","data":{"document_id":document_id,"format":format},"timestamp":int(time.time()*1000)}) + '\n')
+    except:
+        pass
+    # #endregion
+    
     # Load document
-    document = db.query(Document).filter(Document.id == document_id).first()
+    document = _safe_get_document_by_id(document_id, db)
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
