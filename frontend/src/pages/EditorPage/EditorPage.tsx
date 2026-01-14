@@ -857,7 +857,6 @@ export default function EditorPage() {
           
           for (const sectionId of updatedSectionIds) {
             const updatedSection = updatedSections.find(s => s.id === sectionId);
-            const originalSection = sections.find(s => s.id === sectionId);
             const expectedContent = suggestedContent[sectionId];
             
             if (!updatedSection) {
@@ -1157,13 +1156,6 @@ export default function EditorPage() {
     }
   }
 
-  /**
-   * Legacy function for backward compatibility - now calls handleChatMessage
-   * @deprecated Use handleChatMessage instead
-   */
-  function handleAssistantModify() {
-    handleChatMessage();
-  }
 
   /**
    * Generate content for confirmed headings.
