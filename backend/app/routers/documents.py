@@ -70,33 +70,52 @@ def get_document(
     
     if not document:
         # Create empty document if it doesn't exist
-        document = Document(
-            company_id=company_id,
-            type="vorhabensbeschreibung",
-            content_json={"sections": []},
-            chat_history=[]  # Initialize empty chat history
-        )
-        db.add(document)
-        db.commit()
-        db.refresh(document)
+        # Don't set chat_history in constructor - let it be None initially to avoid errors if column doesn't exist
+        try:
+            document = Document(
+                company_id=company_id,
+                type="vorhabensbeschreibung",
+                content_json={"sections": []}
+                # chat_history is not set here - will be initialized after creation if column exists
+            )
+            db.add(document)
+            db.commit()
+            db.refresh(document)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to create document for company {company_id}: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create document: {str(e)}"
+            )
     
     # Ensure chat_history is initialized if null
     # Handle case where column might not exist yet (migration not run)
     try:
-        if document.chat_history is None:
+        # Check if chat_history attribute exists (column exists in DB)
+        if hasattr(document, 'chat_history'):
+            if document.chat_history is None:
+                try:
+                    document.chat_history = []
+                    db.commit()
+                    db.refresh(document)
+                    logger.debug(f"Initialized chat_history for document {document.id}")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize chat_history (column may not exist yet): {str(e)}")
+                    db.rollback()
+                    # Set to empty list in memory even if DB update fails
+                    document.chat_history = []
+        else:
+            # Column doesn't exist - set to empty list in memory only
+            logger.warning(f"chat_history column does not exist in database for document {document.id}")
             document.chat_history = []
-            try:
-                db.commit()
-                db.refresh(document)
-                logger.debug(f"Initialized chat_history for document {document.id}")
-            except Exception as e:
-                logger.warning(f"Failed to initialize chat_history (column may not exist yet): {str(e)}")
-                # Set to empty list in memory even if DB update fails
-                document.chat_history = []
-    except AttributeError:
-        # Column doesn't exist in database yet - set to empty list
-        logger.warning(f"chat_history column may not exist in database for document {document.id}")
-        document.chat_history = []
+    except Exception as e:
+        # Fallback: if anything goes wrong, set to empty list in memory
+        logger.warning(f"Error initializing chat_history for document {document.id}: {str(e)}")
+        try:
+            document.chat_history = []
+        except:
+            pass  # If we can't even set it in memory, continue without it
     
     return document
 
