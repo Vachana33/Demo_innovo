@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from app.database import get_db
 from app.models import User
 from app.schemas import UserCreate, UserLogin, AuthResponse, TokenResponse, PasswordResetRequest, PasswordReset
@@ -21,11 +23,15 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     Security: Passwords are hashed with bcrypt before storage.
     Email validation ensures only allowed domains can register.
     """
-    # Check if user already exists (case-insensitive)
-    existing_user = db.query(User).filter(User.email == user_data.email.lower()).first()
+    # Normalize email to lowercase for consistent storage
+    email_lower = user_data.email.lower()
+    
+    # Check if user already exists (case-insensitive query using func.lower)
+    # This ensures we catch duplicates regardless of how they were stored
+    existing_user = db.query(User).filter(func.lower(User.email) == email_lower).first()
     
     if existing_user:
-        logger.info(f"Registration attempt with existing email: {user_data.email.lower()}")
+        logger.info(f"Registration attempt with existing email: {email_lower}")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Account already exists. Please log in."
@@ -37,7 +43,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     
     # Create new user
     new_user = User(
-        email=user_data.email.lower(),
+        email=email_lower,
         password_hash=password_hash
     )
     
@@ -49,6 +55,15 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
         return AuthResponse(
             success=True,
             message="Account created successfully"
+        )
+    except IntegrityError as e:
+        # Handle database-level unique constraint violation
+        # This catches duplicates even if the query above missed them (race condition, etc.)
+        db.rollback()
+        logger.warning(f"Registration attempt with duplicate email (caught by DB constraint): {email_lower}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account already exists. Please log in."
         )
     except Exception as e:
         db.rollback()

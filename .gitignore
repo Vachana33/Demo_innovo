@@ -49,3 +49,8 @@ htmlcov/
 *.temp
 .cache/
 
+# User uploads (should not be committed to repository)
+backend/uploads/
+frontend/uploads/
+uploads/
+

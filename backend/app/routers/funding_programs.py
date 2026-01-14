@@ -23,10 +23,11 @@ def create_funding_program(
             detail="Title is required"
         )
     
-    # Create new funding program
+    # Create new funding program (owned by current user)
     new_program = FundingProgram(
         title=program_data.title.strip(),
-        website=program_data.website.strip() if program_data.website else None
+        website=program_data.website.strip() if program_data.website else None,
+        user_email=current_user.email
     )
     
     try:
@@ -47,9 +48,11 @@ def get_funding_programs(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get all funding programs.
+    Get all funding programs owned by the current user.
     """
-    programs = db.query(FundingProgram).order_by(FundingProgram.created_at.desc()).all()
+    programs = db.query(FundingProgram).filter(
+        FundingProgram.user_email == current_user.email
+    ).order_by(FundingProgram.created_at.desc()).all()
     return programs
 
 @router.put("/funding-programs/{funding_program_id}", response_model=FundingProgramResponse)
@@ -62,7 +65,10 @@ def update_funding_program(
     """
     Update an existing funding program.
     """
-    funding_program = db.query(FundingProgram).filter(FundingProgram.id == funding_program_id).first()
+    funding_program = db.query(FundingProgram).filter(
+        FundingProgram.id == funding_program_id,
+        FundingProgram.user_email == current_user.email
+    ).first()
     if not funding_program:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -99,7 +105,10 @@ def delete_funding_program(
     """
     Delete a funding program.
     """
-    funding_program = db.query(FundingProgram).filter(FundingProgram.id == funding_program_id).first()
+    funding_program = db.query(FundingProgram).filter(
+        FundingProgram.id == funding_program_id,
+        FundingProgram.user_email == current_user.email
+    ).first()
     if not funding_program:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

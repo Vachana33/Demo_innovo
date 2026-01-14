@@ -12,6 +12,10 @@ class User(Base):
     # Password reset fields - stored as hashed token for security
     reset_token_hash = Column(String, nullable=True)  # Hashed reset token
     reset_token_expiry = Column(DateTime(timezone=True), nullable=True)  # Token expiration time
+    
+    # Relationships to user-owned resources
+    funding_programs = relationship("FundingProgram", back_populates="user")
+    companies = relationship("Company", back_populates="user")
 
 class FundingProgram(Base):
     __tablename__ = "funding_programs"
@@ -20,6 +24,10 @@ class FundingProgram(Base):
     title = Column(String, nullable=False)
     website = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    user_email = Column(String, ForeignKey("users.email"), nullable=False, index=True)
+
+    # Relationship to user (owner)
+    user = relationship("User", back_populates="funding_programs")
 
     # Many-to-many relationship with companies
     companies = relationship(
@@ -40,6 +48,10 @@ class Company(Base):
     processing_status = Column(String, nullable=True, server_default="pending")  # "pending", "processing", "done", "failed"
     processing_error = Column(String, nullable=True)  # Error message if processing failed
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    user_email = Column(String, ForeignKey("users.email"), nullable=False, index=True)
+
+    # Relationship to user (owner)
+    user = relationship("User", back_populates="companies")
 
     # Many-to-many relationship with funding programs
     funding_programs = relationship(

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from sqlalchemy import delete
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from app.database import get_db
 from app.models import FundingProgram, Company, Document, funding_program_companies, User
 from app.schemas import CompanyCreate, CompanyResponse
@@ -172,8 +173,11 @@ def create_company_in_program(
     
     Note: For file uploads, use the /upload-audio endpoint first, then provide the audio_path.
     """
-    # Verify funding program exists
-    funding_program = db.query(FundingProgram).filter(FundingProgram.id == funding_program_id).first()
+    # Verify funding program exists and belongs to current user
+    funding_program = db.query(FundingProgram).filter(
+        FundingProgram.id == funding_program_id,
+        FundingProgram.user_email == current_user.email
+    ).first()
     if not funding_program:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -186,20 +190,38 @@ def create_company_in_program(
             detail="Company name is required"
         )
     
-    # Create new company with initial processing status
+    # Create new company with initial processing status (owned by current user)
     new_company = Company(
         name=company_data.name.strip(),
         website=company_data.website.strip() if company_data.website else None,
         audio_path=company_data.audio_path.strip() if company_data.audio_path else None,
-        processing_status="pending"
+        processing_status="pending",
+        user_email=current_user.email
     )
     
     try:
         db.add(new_company)
         db.flush()  # Flush to get the company ID
         
+        # Refresh funding_program to ensure we have latest state
+        db.refresh(funding_program)
+        
         # Link company to funding program
-        funding_program.companies.append(new_company)
+        # Check if link already exists to avoid UNIQUE constraint violation
+        # Check both via relationship and direct query for safety
+        company_already_linked = new_company in funding_program.companies
+        
+        if not company_already_linked:
+            # Double-check with direct query
+            existing_link = db.execute(
+                select(funding_program_companies).where(
+                    funding_program_companies.c.funding_program_id == funding_program_id,
+                    funding_program_companies.c.company_id == new_company.id
+                )
+            ).first()
+            
+            if not existing_link:
+                funding_program.companies.append(new_company)
         
         db.commit()
         db.refresh(new_company)
@@ -215,6 +237,32 @@ def create_company_in_program(
             logger.info(f"Company preprocessing task enqueued for company_id={new_company.id}")
         
         return new_company
+    except IntegrityError as e:
+        db.rollback()
+        # Check if it's a UNIQUE constraint on the join table
+        error_str = str(e.orig) if hasattr(e, 'orig') else str(e)
+        if 'funding_program_companies' in error_str and 'UNIQUE' in error_str:
+            # Company link already exists - this means the company was created in a previous transaction
+            # or the link already exists. Query for the company by its identifying attributes
+            # (not by ID, since the rollback undid the insertion)
+            logger.warning(f"Company link already exists for funding_program_id={funding_program_id}, attempting to find existing company")
+            # Query for the company by name and user_email (the identifying attributes)
+            existing_company = db.query(Company).filter(
+                Company.name == company_data.name.strip(),
+                Company.user_email == current_user.email
+            ).first()
+            if existing_company:
+                # Ensure it's linked to the funding program
+                db.refresh(funding_program)
+                if existing_company not in funding_program.companies:
+                    funding_program.companies.append(existing_company)
+                    db.commit()
+                return existing_company
+        # Re-raise if it's not the join table constraint or company not found
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create company: {str(e)}"
+        )
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -234,16 +282,20 @@ def get_companies_for_program(
     """
     Get all companies linked to a specific funding program.
     """
-    # Verify funding program exists
-    funding_program = db.query(FundingProgram).filter(FundingProgram.id == funding_program_id).first()
+    # Verify funding program exists and belongs to current user
+    funding_program = db.query(FundingProgram).filter(
+        FundingProgram.id == funding_program_id,
+        FundingProgram.user_email == current_user.email
+    ).first()
     if not funding_program:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Funding program not found"
         )
     
-    # Return companies linked to this funding program
-    return funding_program.companies
+    # Return companies linked to this funding program (filtered by user ownership)
+    # Only return companies that belong to the current user
+    return [c for c in funding_program.companies if c.user_email == current_user.email]
 
 @router.get("/companies", response_model=List[CompanyResponse])
 def get_all_companies(
@@ -251,10 +303,12 @@ def get_all_companies(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get all companies across all funding programs.
+    Get all companies owned by the current user across all funding programs.
     Used for importing existing companies.
     """
-    companies = db.query(Company).order_by(Company.created_at.desc()).all()
+    companies = db.query(Company).filter(
+        Company.user_email == current_user.email
+    ).order_by(Company.created_at.desc()).all()
     return companies
 
 @router.get("/companies/{company_id}", response_model=CompanyResponse)
@@ -266,7 +320,10 @@ def get_company(
     """
     Get a single company by ID.
     """
-    company = db.query(Company).filter(Company.id == company_id).first()
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.user_email == current_user.email
+    ).first()
     if not company:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -289,16 +346,22 @@ def import_company_to_program(
     Import an existing company into a funding program.
     Only creates an entry in the join table, does not create a new company.
     """
-    # Verify funding program exists
-    funding_program = db.query(FundingProgram).filter(FundingProgram.id == funding_program_id).first()
+    # Verify funding program exists and belongs to current user
+    funding_program = db.query(FundingProgram).filter(
+        FundingProgram.id == funding_program_id,
+        FundingProgram.user_email == current_user.email
+    ).first()
     if not funding_program:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Funding program not found"
         )
     
-    # Verify company exists
-    company = db.query(Company).filter(Company.id == company_id).first()
+    # Verify company exists and belongs to current user
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.user_email == current_user.email
+    ).first()
     if not company:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -333,7 +396,10 @@ def update_company(
     """
     Update an existing company.
     """
-    company = db.query(Company).filter(Company.id == company_id).first()
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.user_email == current_user.email
+    ).first()
     if not company:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -372,7 +438,10 @@ def delete_company(
     Delete a company.
     This removes the company from the database entirely.
     """
-    company = db.query(Company).filter(Company.id == company_id).first()
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.user_email == current_user.email
+    ).first()
     if not company:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
