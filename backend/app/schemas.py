@@ -104,6 +104,7 @@ class DocumentResponse(BaseModel):
     company_id: int
     type: str
     content_json: dict
+    chat_history: Optional[list[dict]] = None  # Chat messages history
     updated_at: datetime
 
     class Config:
@@ -111,4 +112,21 @@ class DocumentResponse(BaseModel):
 
 class DocumentUpdate(BaseModel):
     content_json: dict
+
+# Chat Schemas
+class ChatRequest(BaseModel):
+    message: str
+    last_edited_sections: Optional[list[str]] = None  # Optional context for clarification suggestions
+    conversation_history: Optional[list[dict]] = None  # Optional conversation history for context
+
+class ChatResponse(BaseModel):
+    message: str
+    updated_sections: Optional[list[str]] = None  # List of section IDs that were updated
+    is_question: Optional[bool] = False  # True if this is a question answer (not an edit)
+    suggested_content: Optional[dict[str, str]] = None  # Map of section_id -> suggested_content for preview
+    requires_confirmation: Optional[bool] = False  # True if user needs to confirm before saving
+
+class ChatConfirmationRequest(BaseModel):
+    section_id: str
+    confirmed_content: str  # The content user approved
 

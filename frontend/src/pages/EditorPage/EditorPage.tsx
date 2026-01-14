@@ -15,6 +15,9 @@ type EditorMode = "reviewHeadings" | "confirmedHeadings" | "editingContent";
 interface ChatMessage {
   role: "user" | "assistant";
   text: string;
+  suggestedContent?: Record<string, string>; // section_id -> suggested_content
+  requiresConfirmation?: boolean;
+  messageId?: string; // For tracking which message needs confirmation
 }
 
 export default function EditorPage() {
@@ -32,8 +35,16 @@ export default function EditorPage() {
   const [documentId, setDocumentId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [lastEditedSections, setLastEditedSections] = useState<string[]>([]); // Track last edited sections for context
   const isInitialLoad = useRef(true);
   const chatMessagesEndRef = useRef<HTMLDivElement | null>(null);
+  const isUpdatingFromChat = useRef(false); // Flag to prevent auto-save race condition after chat updates
+  const previousSectionsRef = useRef<Section[]>([]); // Track previous sections for undo/redo history
+  
+  // Preview state management
+  const [previewContent, setPreviewContent] = useState<Record<string, string> | null>(null);
+  const [previewSectionIds, setPreviewSectionIds] = useState<string[]>([]);
 
   const [showExportMenu, setShowExportMenu] = useState(false);
 
@@ -91,6 +102,29 @@ export default function EditorPage() {
         } else {
           setSections([]);
           setEditorMode(null);
+        }
+        
+        // Load chat history if available
+        if (data.chat_history && Array.isArray(data.chat_history)) {
+          if (data.chat_history.length > 0) {
+            const loadedMessages: ChatMessage[] = data.chat_history.map((msg: any) => ({
+              role: msg.role as "user" | "assistant",
+              text: msg.text,
+              suggestedContent: msg.suggestedContent,
+              requiresConfirmation: msg.requiresConfirmation,
+              messageId: msg.messageId
+            }));
+            setChatMessages(loadedMessages);
+            console.log(`Loaded ${loadedMessages.length} chat messages from history`);
+          } else {
+            // Explicitly set to empty array if chat_history exists but is empty
+            setChatMessages([]);
+            console.log("Chat history exists but is empty");
+          }
+        } else {
+          // No chat_history field - initialize empty
+          setChatMessages([]);
+          console.log("No chat history found in document");
         }
         
         // Mark initial load as complete
@@ -152,35 +186,54 @@ export default function EditorPage() {
   // Save history when sections change (but not on initial load)
   useEffect(() => {
     if (isInitialLoad.current) {
+      // Store initial state in ref
+      previousSectionsRef.current = sections.map(s => ({ ...s }));
       return; // Don't track history on initial load
     }
     
-    // When sections change, push previous state to history
+    // When sections change, push PREVIOUS state to history (not current state)
     // Clear future stack (new edit invalidates redo)
     if (sections.length > 0) {
+      // Get the previous state from ref
+      const previousState = previousSectionsRef.current;
+      
       // Only track if there's a meaningful change
       // This prevents tracking every keystroke, but tracks meaningful edits
       const timeoutId = setTimeout(() => {
-        setHistoryPast((prev) => {
-          // Avoid duplicate consecutive states
-          if (prev.length > 0) {
-            const lastState = prev[prev.length - 1];
-            const isDuplicate = JSON.stringify(lastState) === JSON.stringify(sections);
-            if (isDuplicate) return prev;
-          }
-          return [...prev, sections.map(s => ({ ...s }))];
-        });
-        setHistoryFuture([]); // Clear future on new edit
+        // Check if current state is different from previous state
+        const isDifferent = JSON.stringify(previousState) !== JSON.stringify(sections);
+        
+        if (isDifferent && previousState.length > 0) {
+          setHistoryPast((prev) => {
+            // Avoid duplicate consecutive states
+            if (prev.length > 0) {
+              const lastState = prev[prev.length - 1];
+              const isDuplicate = JSON.stringify(lastState) === JSON.stringify(previousState);
+              if (isDuplicate) return prev;
+            }
+            // Save the PREVIOUS state (before the change)
+            return [...prev, previousState.map(s => ({ ...s }))];
+          });
+          setHistoryFuture([]); // Clear future on new edit
+        }
+        
+        // Update ref to current state for next change
+        previousSectionsRef.current = sections.map(s => ({ ...s }));
       }, 500); // Debounce to avoid too many history entries
       
       return () => clearTimeout(timeoutId);
     }
   }, [sections]);
 
-  // Save when sections change (but not on initial load)
+  // Save when sections change (but not on initial load or after chat updates)
   useEffect(() => {
     if (isInitialLoad.current) {
       return; // Don't save on initial load
+    }
+    if (isUpdatingFromChat.current) {
+      // Skip auto-save when updating from chat response (prevents race condition)
+      isUpdatingFromChat.current = false;
+      return;
     }
     if (documentId) {
       saveDocument(sections);
@@ -199,9 +252,15 @@ export default function EditorPage() {
   // Scroll chat to bottom when new messages are added
   useEffect(() => {
     if (chatMessagesEndRef.current) {
-      chatMessagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+      // Use setTimeout to ensure DOM is updated
+      setTimeout(() => {
+        chatMessagesEndRef.current?.scrollIntoView({ 
+          behavior: "smooth",
+          block: "end"
+        });
+      }, 100);
     }
-  }, [chatMessages]);
+  }, [chatMessages, isChatLoading]); // Add isChatLoading to dependencies
 
   /**
    * When editor mode changes to confirmedHeadings, check if company processing is needed.
@@ -537,13 +596,23 @@ export default function EditorPage() {
   function handleUndo() {
     if (!canUndo || historyPast.length === 0) return;
     
+    // Save current state to ref before changing (for history tracking)
+    previousSectionsRef.current = sections.map(s => ({ ...s }));
+    
     // Move current state to future (for redo)
     setHistoryFuture((prev) => [sections.map(s => ({ ...s })), ...prev]);
     
     // Pop last state from past and set as current
     const previousState = historyPast[historyPast.length - 1];
     setHistoryPast((prev) => prev.slice(0, -1));
-    setSections(previousState.map(s => ({ ...s })));
+    
+    // Update sections state - this will trigger the history tracking useEffect
+    // but we've already saved current state to ref, so it won't interfere
+    const restoredState = previousState.map(s => ({ ...s }));
+    setSections(restoredState);
+    
+    // Update ref to match restored state
+    previousSectionsRef.current = restoredState;
   }
 
   /**
@@ -552,13 +621,23 @@ export default function EditorPage() {
   function handleRedo() {
     if (!canRedo || historyFuture.length === 0) return;
     
+    // Save current state to ref before changing (for history tracking)
+    previousSectionsRef.current = sections.map(s => ({ ...s }));
+    
     // Move current state to past (for undo)
     setHistoryPast((prev) => [...prev, sections.map(s => ({ ...s }))]);
     
     // Pop first state from future and set as current
     const nextState = historyFuture[0];
     setHistoryFuture((prev) => prev.slice(1));
-    setSections(nextState.map(s => ({ ...s })));
+    
+    // Update sections state - this will trigger the history tracking useEffect
+    // but we've already saved current state to ref, so it won't interfere
+    const restoredState = nextState.map(s => ({ ...s }));
+    setSections(restoredState);
+    
+    // Update ref to match restored state
+    previousSectionsRef.current = restoredState;
   }
 
   // Parse section IDs from command (e.g., "remove 5.2 and 5.3" or "remove 2.3")
@@ -636,62 +715,454 @@ export default function EditorPage() {
     return renumbered;
   }
 
-  function handleAssistantModify() {
-    const userCommand = chatInput.trim();
-    if (!userCommand) {
+  // Clear preview
+  function clearPreview() {
+    setPreviewContent(null);
+    setPreviewSectionIds([]);
+  }
+
+  // Handle approve edit - apply confirmed changes
+  async function handleApproveEdit(_messageId: string, suggestedContent: Record<string, string>) {
+    if (!documentId) {
+      console.error("Cannot approve edit: documentId is missing");
+      setChatMessages(prev => [...prev, {
+        role: "assistant",
+        text: "Fehler: Dokument-ID fehlt. Bitte aktualisieren Sie die Seite."
+      }]);
+      return;
+    }
+    
+    if (!suggestedContent || Object.keys(suggestedContent).length === 0) {
+      console.error("Cannot approve edit: suggestedContent is empty or missing");
+      setChatMessages(prev => [...prev, {
+        role: "assistant",
+        text: "Fehler: Keine Vorschau-Inhalte gefunden. Bitte versuchen Sie es erneut."
+      }]);
+      return;
+    }
+    
+    console.log(`Approving edit for ${Object.keys(suggestedContent).length} section(s):`, Object.keys(suggestedContent));
+    console.log("Suggested content:", suggestedContent);
+    
+    // NEW: Validate that suggestedContent doesn't contain user question text
+    const recentUserMessages = chatMessages
+      .filter(msg => msg.role === "user")
+      .slice(-5) // Check last 5 user messages
+      .map(msg => msg.text.trim().toLowerCase());
+    
+    try {
+      setIsChatLoading(true);
+      
+      // Call confirmation endpoint for each section
+      const updatedSectionIds: string[] = [];
+      const errors: string[] = [];
+      
+      for (const [sectionId, content] of Object.entries(suggestedContent)) {
+        try {
+          if (!sectionId || !content) {
+            console.error(`Invalid section data: sectionId=${sectionId}, content=${content ? 'exists' : 'missing'}`);
+            errors.push(`Section ${sectionId}: Invalid data`);
+            continue;
+          }
+          
+          // Ensure content is a string
+          const contentStr = typeof content === 'string' ? content : String(content);
+          if (!contentStr || contentStr.trim().length === 0) {
+            console.error(`Section ${sectionId}: Content is empty`);
+            errors.push(`Section ${sectionId}: Content is empty`);
+            continue;
+          }
+          
+          // NEW: Enhanced logging
+          console.log(`=== Approving edit for section ${sectionId} ===`);
+          console.log(`Content length: ${contentStr.length}`);
+          console.log(`Content preview (first 200 chars): ${contentStr.substring(0, 200)}...`);
+          const lastUserMessage = chatMessages.filter(m => m.role === "user").slice(-1)[0]?.text || "N/A";
+          console.log(`Last user message: ${lastUserMessage}`);
+          
+          // NEW: Validate that suggestedContent doesn't contain user question text
+          const contentLower = contentStr.trim().toLowerCase();
+          
+          // Check if content matches any recent user message
+          if (recentUserMessages.some(userMsg => contentLower === userMsg || contentLower.includes(userMsg))) {
+            console.error(`ERROR: Suggested content for section ${sectionId} appears to be user question text!`);
+            console.error(`User message matched: ${recentUserMessages.find(userMsg => contentLower === userMsg || contentLower.includes(userMsg))}`);
+            console.error(`Content that matched: ${contentStr.substring(0, 200)}...`);
+            errors.push(`Section ${sectionId}: Content validation failed - appears to be user question text`);
+            continue;
+          }
+          
+          // Verify content doesn't match user message
+          if (lastUserMessage !== "N/A" && contentStr.trim().toLowerCase() === lastUserMessage.trim().toLowerCase()) {
+            console.error(`CRITICAL ERROR: Content matches user message! This should not happen.`);
+            errors.push(`Section ${sectionId}: Content validation failed - matches user question`);
+            continue;
+          }
+          
+          // Validate content length (AI-generated content should be substantial)
+          if (contentStr.trim().length < 50) {
+            console.warn(`Warning: Suggested content for section ${sectionId} is very short (${contentStr.trim().length} chars). This might be an error.`);
+            // Don't block it, but log a warning
+          }
+          
+          console.log(`Confirming edit for section ${sectionId}, content length: ${contentStr.length}`);
+          console.log(`Content preview: ${contentStr.substring(0, 100)}...`);
+          
+          const response = await apiPost(`/documents/${documentId}/chat/confirm`, {
+            section_id: sectionId,
+            confirmed_content: contentStr
+          });
+          
+          console.log(`Successfully confirmed edit for section ${sectionId}:`, response);
+          updatedSectionIds.push(sectionId);
+        } catch (error: any) {
+          const errorMsg = error.message || error.toString() || "Unknown error";
+          console.error(`Failed to confirm edit for section ${sectionId}:`, error);
+          console.error(`Error details:`, errorMsg);
+          errors.push(`Section ${sectionId}: ${errorMsg}`);
+          // Continue with other sections even if one fails
+        }
+      }
+      
+      if (updatedSectionIds.length === 0) {
+        const errorMessage = errors.length > 0 
+          ? `Fehler beim Speichern der Änderungen: ${errors.join('; ')}`
+          : "Fehler beim Speichern der Änderungen. Bitte versuchen Sie es erneut.";
+        setChatMessages(prev => [...prev, {
+          role: "assistant",
+          text: errorMessage
+        }]);
+        return;
+      }
+      
+      // Log if some sections failed
+      if (errors.length > 0) {
+        console.warn(`Some sections failed to save: ${errors.join('; ')}`);
+      }
+      
+      // Wait a brief moment to ensure backend save is complete
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+      // Fetch updated document
+      try {
+        console.log(`Fetching updated document after confirming ${updatedSectionIds.length} section(s)`);
+        const updatedDocument = await apiGet<any>(
+          `/documents/${companyIdNum}/vorhabensbeschreibung`
+        );
+        
+        if (updatedDocument.content_json && updatedDocument.content_json.sections) {
+          // Verify the sections were actually updated
+          const updatedSections = updatedDocument.content_json.sections as Section[];
+          let allSectionsUpdated = true;
+          
+          for (const sectionId of updatedSectionIds) {
+            const updatedSection = updatedSections.find(s => s.id === sectionId);
+            const originalSection = sections.find(s => s.id === sectionId);
+            const expectedContent = suggestedContent[sectionId];
+            
+            if (!updatedSection) {
+              console.error(`Section ${sectionId} not found in updated document!`);
+              allSectionsUpdated = false;
+            } else if (updatedSection.content !== expectedContent) {
+              console.warn(`Section ${sectionId} content mismatch! Expected length: ${expectedContent.length}, Got: ${updatedSection.content.length}`);
+              console.warn(`Expected preview: ${expectedContent.substring(0, 100)}...`);
+              console.warn(`Got preview: ${updatedSection.content.substring(0, 100)}...`);
+              allSectionsUpdated = false;
+            } else {
+              console.log(`✓ Section ${sectionId} successfully updated (length: ${updatedSection.content.length})`);
+            }
+          }
+          
+          if (!allSectionsUpdated) {
+            console.error("Some sections were not updated correctly!");
+          }
+          
+          // Set flag to prevent auto-save from overwriting confirmed updates
+          isUpdatingFromChat.current = true;
+          
+          // Update sections state (this will trigger history tracking for undo/redo)
+          // History tracking only happens when sections state changes, not for previews
+          setSections(updatedSections);
+          
+          // Clear preview
+          clearPreview();
+          
+          // Add confirmation message to chat
+          const confirmMessage = updatedSectionIds.length === 1
+            ? `Änderung für Abschnitt ${updatedSectionIds[0]} wurde bestätigt und gespeichert.`
+            : `Änderungen für Abschnitte ${updatedSectionIds.join(", ")} wurden bestätigt und gespeichert.`;
+          
+          setChatMessages(prev => [...prev, {
+            role: "assistant",
+            text: confirmMessage
+          }]);
+          
+          // Reset flag after state update (useEffect will handle auto-save)
+          setTimeout(() => {
+            isUpdatingFromChat.current = false;
+          }, 100);
+          
+          // Note: History tracking happens automatically via useEffect when sections change
+          // Since previews don't change sections state, they won't be tracked in history
+          // Only approved changes (which update sections state) will be in undo/redo history
+        } else {
+          console.error("Updated document has no sections!");
+          clearPreview();
+          setChatMessages(prev => [...prev, {
+            role: "assistant",
+            text: "Fehler: Aktualisiertes Dokument hat keine Abschnitte. Bitte aktualisieren Sie die Seite."
+          }]);
+        }
+      } catch (error: any) {
+        console.error("Error fetching updated document:", error);
+        clearPreview();
+        setChatMessages(prev => [...prev, {
+          role: "assistant",
+          text: `Änderungen wurden gespeichert, aber es gab einen Fehler beim Aktualisieren der Ansicht: ${error.message || "Unknown error"}. Bitte aktualisieren Sie die Seite.`
+        }]);
+      }
+    } catch (error: any) {
+      console.error("Error approving edit:", error);
+      setChatMessages(prev => [...prev, {
+        role: "assistant",
+        text: error.message || "Fehler beim Bestätigen der Änderungen. Bitte versuchen Sie es erneut."
+      }]);
+    } finally {
+      setIsChatLoading(false);
+    }
+  }
+
+  // Handle reject edit - discard preview
+  function handleRejectEdit(_messageId: string) {
+    // Clear preview
+    clearPreview();
+    
+    // Add rejection message to chat
+    setChatMessages(prev => [...prev, {
+      role: "assistant",
+      text: "Änderungen wurden verworfen. Sie können eine neue Bearbeitungsanfrage stellen."
+    }]);
+  }
+
+  /**
+   * Handle chat messages for section editing.
+   * In reviewHeadings mode: supports "remove" commands for backward compatibility.
+   * In editingContent mode: calls the chat API for section-specific edits.
+   */
+  async function handleChatMessage() {
+    const userMessage = chatInput.trim();
+    if (!userMessage || !documentId) {
       return;
     }
 
     // Add user message to chat
-    setChatMessages(prev => [...prev, { role: "user", text: userCommand }]);
+    setChatMessages(prev => [...prev, { role: "user", text: userMessage }]);
+    const messageToSend = userMessage;
+    setChatInput("");
 
-    const idsToRemove = parseRemoveCommand(userCommand);
-    
-    if (idsToRemove.length === 0) {
-      // Invalid command format
+    // In reviewHeadings mode, check if it's a "remove" command (backward compatibility)
+    if (editorMode === "reviewHeadings") {
+      const idsToRemove = parseRemoveCommand(messageToSend);
+      
+      if (idsToRemove.length > 0) {
+        // Handle remove command (existing functionality)
+        // Check if all referenced sections exist
+        const existingIds = new Set(sections.map(s => s.id));
+        const missingIds = idsToRemove.filter(id => !existingIds.has(id));
+        
+        if (missingIds.length > 0) {
+          // Some sections don't exist
+          const missingText = missingIds.length === 1 
+            ? `I couldn't find section ${missingIds[0]}.`
+            : `I couldn't find sections ${missingIds.join(", ")}.`;
+          setChatMessages(prev => [...prev, { role: "assistant", text: missingText }]);
+          return;
+        }
+
+        // Remove sections
+        let updatedSections = sections.filter(s => !idsToRemove.includes(s.id));
+        
+        // Also remove any child sections
+        idsToRemove.forEach(id => {
+          updatedSections = updatedSections.filter(s => !s.id.startsWith(id + "."));
+        });
+        
+        // Renumber remaining sections
+        updatedSections = renumberSections(updatedSections);
+        
+        setSections(updatedSections);
+        
+        // Add assistant response
+        const removedText = idsToRemove.length === 1
+          ? `Removed section ${idsToRemove[0]}. Numbering has been updated.`
+          : `Removed sections ${idsToRemove.join(", ")}. Numbering has been updated.`;
+        setChatMessages(prev => [...prev, { role: "assistant", text: removedText }]);
+        return;
+      }
+      // If not a remove command, fall through to chat API call
+    }
+
+    // Call chat API for section editing (editingContent mode or non-remove commands in reviewHeadings)
+    try {
+      setIsChatLoading(true);
+      
+      // Prepare conversation history (last 2-3 messages for context)
+      const conversationHistory = chatMessages.slice(-3).map(msg => ({
+        role: msg.role,
+        text: msg.text
+      }));
+      
+      const response = await apiPost<{
+        message: string;
+        updated_sections?: string[];
+        is_question?: boolean;
+        suggested_content?: Record<string, string>;
+        requires_confirmation?: boolean;
+      }>(`/documents/${documentId}/chat`, {
+        message: messageToSend,
+        last_edited_sections: lastEditedSections, // Send context for clarification suggestions
+        conversation_history: conversationHistory, // Send conversation history for context
+      });
+
+      // If this was a question (not a section edit), just display the answer
+      // No need to update sections or fetch document
+      if (response.is_question) {
+        // Question answered - no section updates needed
+        setChatMessages(prev => [...prev, { 
+          role: "assistant", 
+          text: response.message 
+        }]);
+        return;
+      }
+
+      // If this requires confirmation (preview mode), show preview and wait for user approval
+      if (response.requires_confirmation && response.suggested_content) {
+        // NEW: Validate suggested_content before using it
+        const validatedSuggestedContent: Record<string, string> = {};
+        
+        for (const [sectionId, content] of Object.entries(response.suggested_content)) {
+          if (typeof content !== 'string' || content.trim().length === 0) {
+            console.error(`Invalid suggested content for section ${sectionId}: empty or not a string`);
+            continue;
+          }
+          
+          // Check if content looks like user question (too short or matches user message)
+          const userMessageLower = messageToSend.trim().toLowerCase();
+          const contentLower = content.trim().toLowerCase();
+          
+          if (contentLower === userMessageLower || contentLower.length < 50) {
+            console.error(`ERROR: Suggested content for section ${sectionId} appears to be user question or too short!`);
+            console.error(`User message: ${userMessageLower}`);
+            console.error(`Suggested content: ${contentLower.substring(0, 100)}...`);
+            console.error(`Content length: ${content.trim().length}`);
+            // Don't add this section to preview - it's invalid
+            continue;
+          }
+          
+          validatedSuggestedContent[sectionId] = content;
+        }
+        
+        if (Object.keys(validatedSuggestedContent).length === 0) {
+          // No valid suggested content - show error
+          setChatMessages(prev => [...prev, {
+            role: "assistant",
+            text: "Fehler: Die generierte Vorschau enthält ungültige Daten. Bitte versuchen Sie es erneut."
+          }]);
+          return;
+        }
+        
+        const messageId = `msg-${Date.now()}`;
+        // Use validated content instead of raw response
+        setChatMessages(prev => [...prev, {
+          role: "assistant",
+          text: response.message,
+          suggestedContent: validatedSuggestedContent, // Use validated content
+          requiresConfirmation: true,
+          messageId: messageId
+        }]);
+        
+        // Show preview with validated content
+        setPreviewContent(validatedSuggestedContent);
+        setPreviewSectionIds(Object.keys(validatedSuggestedContent));
+        return;
+      }
+
+      // Add assistant response to chat (for non-question, non-preview responses)
       setChatMessages(prev => [...prev, { 
         role: "assistant", 
-        text: "I didn't understand that. Try commands like 'remove 5.2'." 
+        text: response.message 
       }]);
-      setChatInput("");
-      return;
-    }
 
-    // Check if all referenced sections exist
-    const existingIds = new Set(sections.map(s => s.id));
-    const missingIds = idsToRemove.filter(id => !existingIds.has(id));
-    
-    if (missingIds.length > 0) {
-      // Some sections don't exist
-      const missingText = missingIds.length === 1 
-        ? `I couldn't find section ${missingIds[0]}.`
-        : `I couldn't find sections ${missingIds.join(", ")}.`;
-      setChatMessages(prev => [...prev, { role: "assistant", text: missingText }]);
-      setChatInput("");
-      return;
+      // If sections were updated, fetch the latest document to get updated content
+      if (response.updated_sections && response.updated_sections.length > 0) {
+        // Track last edited sections for context awareness
+        setLastEditedSections(response.updated_sections);
+        
+        // Set flag to prevent auto-save from overwriting LLM updates
+        isUpdatingFromChat.current = true;
+        
+        try {
+          console.log("Fetching updated document after chat response...");
+          const updatedDocument = await apiGet<any>(
+            `/documents/${companyIdNum}/vorhabensbeschreibung`
+          );
+          
+          if (updatedDocument.content_json && updatedDocument.content_json.sections) {
+            console.log("Received updated document, updating sections state...");
+            console.log("Updated sections:", response.updated_sections);
+            
+            // Find the updated section to verify content
+            const updatedSection = updatedDocument.content_json.sections.find(
+              (s: Section) => response.updated_sections?.includes(s.id)
+            );
+            if (updatedSection) {
+              console.log(`Section ${updatedSection.id} content length:`, updatedSection.content?.length || 0);
+              console.log(`Section ${updatedSection.id} content preview:`, updatedSection.content?.substring(0, 100));
+            }
+            
+            // FIX: Replace entire sections array - ensures UI matches database
+            // This is the authoritative update from backend
+            setSections(updatedDocument.content_json.sections as Section[]);
+            
+            // Reset flag after state update (useEffect will skip auto-save)
+            setTimeout(() => {
+              isUpdatingFromChat.current = false;
+            }, 100);
+          } else {
+            console.warn("Updated document has no sections in content_json");
+            isUpdatingFromChat.current = false;
+          }
+        } catch (error: any) {
+          console.error("Error fetching updated document:", error);
+          isUpdatingFromChat.current = false;
+          // Don't show error to user - the chat response already indicates success
+          // The sections will be updated on next document load
+        }
+      }
+    } catch (error: any) {
+      console.error("Error sending chat message:", error);
+      
+      // Show error message in chat
+      const errorMessage = error.message || "Failed to process your request. Please try again.";
+      setChatMessages(prev => [...prev, { 
+        role: "assistant", 
+        text: errorMessage 
+      }]);
+      
+      if (error.message.includes("Authentication required")) {
+        logout();
+      }
+    } finally {
+      setIsChatLoading(false);
     }
+  }
 
-    // Remove sections
-    let updatedSections = sections.filter(s => !idsToRemove.includes(s.id));
-    
-    // Also remove any child sections
-    idsToRemove.forEach(id => {
-      updatedSections = updatedSections.filter(s => !s.id.startsWith(id + "."));
-    });
-    
-    // Renumber remaining sections
-    updatedSections = renumberSections(updatedSections);
-    
-    setSections(updatedSections);
-    
-    // Add assistant response
-    const removedText = idsToRemove.length === 1
-      ? `Removed section ${idsToRemove[0]}. Numbering has been updated.`
-      : `Removed sections ${idsToRemove.join(", ")}. Numbering has been updated.`;
-    setChatMessages(prev => [...prev, { role: "assistant", text: removedText }]);
-    
-    setChatInput("");
-    // Document will be saved automatically via useEffect
+  /**
+   * Legacy function for backward compatibility - now calls handleChatMessage
+   * @deprecated Use handleChatMessage instead
+   */
+  function handleAssistantModify() {
+    handleChatMessage();
   }
 
   /**
@@ -993,20 +1464,87 @@ export default function EditorPage() {
                     >
                       {s.title}
                     </div>
-                    <textarea
-                      className={styles.textArea}
-                      value={s.content}
-                      onChange={(e) =>
-                        setSections((prev) =>
-                          prev.map((sec) =>
-                            sec.id === s.id
-                              ? { ...sec, content: e.target.value }
-                              : sec
+                    {previewContent && previewSectionIds.includes(s.id) ? (
+                      // Show diff view for sections in preview mode
+                      <div style={{ 
+                        border: "2px solid var(--brand-gold)", 
+                        borderRadius: "6px",
+                        padding: "0.8rem",
+                        backgroundColor: "#fffef0"
+                      }}>
+                        <div style={{ 
+                          fontSize: "0.75rem", 
+                          color: "var(--brand-gold-dark)",
+                          marginBottom: "0.5rem",
+                          fontWeight: "600"
+                        }}>
+                          Preview (not saved yet)
+                        </div>
+                        {/* Original content (faded/strikethrough) */}
+                        {s.content && (
+                          <div style={{
+                            marginBottom: "0.8rem",
+                            paddingBottom: "0.8rem",
+                            borderBottom: "1px dashed #ccc"
+                          }}>
+                            <div style={{
+                              fontSize: "0.75rem",
+                              color: "#999",
+                              marginBottom: "0.3rem",
+                              fontWeight: "600"
+                            }}>
+                              Original:
+                            </div>
+                            <div style={{
+                              color: "#999",
+                              textDecoration: "line-through",
+                              opacity: 0.6,
+                              fontSize: "0.9rem",
+                              lineHeight: "1.5"
+                            }}>
+                              {s.content}
+                            </div>
+                          </div>
+                        )}
+                        {/* Suggested content (highlighted) */}
+                        <div>
+                          <div style={{
+                            fontSize: "0.75rem",
+                            color: "var(--brand-gold-dark)",
+                            marginBottom: "0.3rem",
+                            fontWeight: "600"
+                          }}>
+                            Suggested:
+                          </div>
+                          <div style={{
+                            color: "var(--brand-text-dark)",
+                            backgroundColor: "#fff9e6",
+                            padding: "0.6rem",
+                            borderRadius: "4px",
+                            fontSize: "0.9rem",
+                            lineHeight: "1.5",
+                            whiteSpace: "pre-wrap"
+                          }}>
+                            {previewContent[s.id]}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <textarea
+                        className={styles.textArea}
+                        value={s.content}
+                        onChange={(e) =>
+                          setSections((prev) =>
+                            prev.map((sec) =>
+                              sec.id === s.id
+                                ? { ...sec, content: e.target.value }
+                                : sec
+                            )
                           )
-                        )
-                      }
-                      placeholder="AI will fill this section, or you can write manually…"
-                    />
+                        }
+                        placeholder="AI will fill this section, or you can write manually…"
+                      />
+                    )}
                   </div>
                 );
               })
@@ -1129,13 +1667,62 @@ export default function EditorPage() {
               {chatMessages.length > 0 && (
                 <div className={styles.chatMessagesContainer}>
                   {chatMessages.map((msg, idx) => (
-                    <div
-                      key={idx}
-                      className={msg.role === "user" ? styles.chatMessageUser : styles.chatMessageAssistant}
-                    >
-                      <div className={styles.chatMessageText}>{msg.text}</div>
+                    <div key={idx}>
+                      <div
+                        className={msg.role === "user" ? styles.chatMessageUser : styles.chatMessageAssistant}
+                      >
+                        <div className={styles.chatMessageText}>{msg.text}</div>
+                      </div>
+                      {/* Show approve/reject buttons for messages requiring confirmation */}
+                      {msg.requiresConfirmation && msg.suggestedContent && msg.messageId && (
+                        <div style={{ 
+                          display: "flex", 
+                          gap: "0.5rem", 
+                          marginTop: "0.5rem",
+                          marginBottom: "0.5rem",
+                          justifyContent: msg.role === "assistant" ? "flex-start" : "flex-end"
+                        }}>
+                          <button
+                            onClick={() => handleApproveEdit(msg.messageId!, msg.suggestedContent!)}
+                            disabled={isChatLoading}
+                            style={{
+                              padding: "0.4rem 0.8rem",
+                              backgroundColor: "var(--brand-gold)",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "6px",
+                              cursor: isChatLoading ? "not-allowed" : "pointer",
+                              fontSize: "0.85rem",
+                              fontWeight: "500"
+                            }}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => handleRejectEdit(msg.messageId!)}
+                            disabled={isChatLoading}
+                            style={{
+                              padding: "0.4rem 0.8rem",
+                              backgroundColor: "#f5f5f5",
+                              color: "var(--brand-text-dark)",
+                              border: "1px solid var(--brand-border)",
+                              borderRadius: "6px",
+                              cursor: isChatLoading ? "not-allowed" : "pointer",
+                              fontSize: "0.85rem",
+                              fontWeight: "500"
+                            }}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ))}
+                  {isChatLoading && (
+                    <div className={styles.chatMessageAssistant}>
+                      <div className={styles.chatMessageText}>Processing...</div>
+                    </div>
+                  )}
                   <div ref={chatMessagesEndRef} />
                 </div>
               )}
@@ -1150,26 +1737,29 @@ export default function EditorPage() {
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && editorMode === "reviewHeadings" && chatInput.trim()) {
-                      handleAssistantModify();
+                    if (e.key === "Enter" && chatInput.trim() && !isChatLoading) {
+                      handleChatMessage();
                     }
                   }}
-                  placeholder={editorMode === "reviewHeadings" ? "Type instructions e.g. 'remove 2.3'…" : "Type instructions…"}
+                  placeholder={
+                    editorMode === "reviewHeadings" 
+                      ? "Type instructions e.g. 'remove 2.3' or 'Section 2.1: make it concise'…" 
+                      : "Type instructions e.g. 'Section 2.1: make it more concise'…"
+                  }
                   className={styles.chatInput}
+                  disabled={isChatLoading}
                 />
 
                 <button
                   className={styles.sendBtn}
                   onClick={() => {
-                    if (editorMode === "reviewHeadings" && chatInput.trim()) {
-                      handleAssistantModify();
-                    } else {
-                      setChatInput("");
+                    if (chatInput.trim() && !isChatLoading) {
+                      handleChatMessage();
                     }
                   }}
-                  disabled={editorMode !== "reviewHeadings" || !chatInput.trim()}
+                  disabled={!chatInput.trim() || isChatLoading}
                 >
-                  ⇨
+                  {isChatLoading ? "…" : "⇨"}
                 </button>
               </div>
             )}

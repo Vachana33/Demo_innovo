@@ -64,6 +64,7 @@ class Document(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     type = Column(String, nullable=False, index=True)  # "vorhabensbeschreibung", "vorkalkulation"
     content_json = Column(JSON, nullable=False)  # Stores sections array as JSON
+    chat_history = Column(JSON, nullable=True)  # Stores chat messages as JSON array
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     # Relationship to company

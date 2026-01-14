@@ -235,6 +235,27 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+    max-height: 450px;  /* Prevents endless expansion */
+    min-height: 200px;  /* Ensures minimum visibility */
+  }
+
+  /* Improve scrollbar appearance */
+  .assistantMessages::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .assistantMessages::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 3px;
+  }
+
+  .assistantMessages::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 3px;
+  }
+
+  .assistantMessages::-webkit-scrollbar-thumb:hover {
+    background: #555;
   }
 
   .chatMessagesContainer {
