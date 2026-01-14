@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
@@ -11,9 +12,9 @@ if ENV_PATH.exists():
 
 # Optional debug logging (only if DEBUG_ENV_LOG=true)
 if os.getenv("DEBUG_ENV_LOG", "").lower() == "true":
-    print("ENV FILE USED:", ENV_PATH if ENV_PATH.exists() else "None (using system env)")
-    print("OPENAI KEY FOUND:", bool(os.getenv("OPENAI_API_KEY")))
-    print("JWT SECRET KEY FOUND:", bool(os.getenv("JWT_SECRET_KEY")))
+    logger.info(f"ENV FILE USED: {ENV_PATH if ENV_PATH.exists() else 'None (using system env)'}")
+    logger.info(f"OPENAI KEY FOUND: {bool(os.getenv('OPENAI_API_KEY'))}")
+    logger.info(f"JWT SECRET KEY FOUND: {bool(os.getenv('JWT_SECRET_KEY'))}")
 
 # Environment validation - fail early with clear errors
 import logging
@@ -42,9 +43,18 @@ from app.routers import auth, funding_programs, companies, documents
 
 # Create database tables
 # Note: In production (PostgreSQL on Render), use Alembic migrations instead
-# This create_all() is kept for local development convenience
+# This create_all() is kept for local development convenience only
 # For production: run "alembic upgrade head" after setting DATABASE_URL
-Base.metadata.create_all(bind=engine)
+# Only run create_all() in development (when DATABASE_URL is not set or is SQLite)
+parsed_url = urlparse(os.getenv("DATABASE_URL", "sqlite:///./innovo.db"))
+is_sqlite = parsed_url.scheme == "sqlite" or "sqlite" in os.getenv("DATABASE_URL", "").lower()
+if is_sqlite:
+    # Only create tables automatically in SQLite (local dev)
+    Base.metadata.create_all(bind=engine)
+    logger.info("Database tables created (SQLite development mode)")
+else:
+    # In production (PostgreSQL), rely on Alembic migrations only
+    logger.info("Skipping automatic table creation (PostgreSQL - use Alembic migrations)")
 
 app = FastAPI(title="Innovo Agent API", version="1.0.0")
 
@@ -67,7 +77,7 @@ else:
 
 # Optional debug logging
 if os.getenv("DEBUG_ENV_LOG", "").lower() == "true":
-    print("CORS ALLOWED ORIGINS:", cors_origins)
+    logger.info(f"CORS ALLOWED ORIGINS: {cors_origins}")
 
 # CORS middleware for frontend
 app.add_middleware(

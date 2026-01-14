@@ -66,6 +66,8 @@ def get_document(
     # Get or create document
     # Handle case where chat_history column doesn't exist in database
     document = None
+    chat_history_missing = False  # Track if we know chat_history column doesn't exist
+    
     try:
         # First try normal query
         document = db.query(Document).filter(
@@ -73,9 +75,13 @@ def get_document(
             Document.type == "vorhabensbeschreibung"
         ).first()
     except ProgrammingError as e:
+        # CRITICAL: Rollback transaction immediately - it's in failed state after the error
+        db.rollback()
+        
         # Check if error is about chat_history column not existing
         error_str = str(e.orig) if hasattr(e, 'orig') else str(e)
         if 'chat_history' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
+            chat_history_missing = True
             logger.warning(f"chat_history column does not exist in database. Using workaround for company {company_id}")
             # Try using defer to exclude chat_history from query
             try:
@@ -90,7 +96,8 @@ def get_document(
                     except:
                         pass
             except Exception as defer_error:
-                # If defer also fails, use raw SQL as last resort
+                # If defer also fails, rollback and use raw SQL as last resort
+                db.rollback()
                 logger.warning(f"Defer approach also failed: {str(defer_error)}. Using raw SQL workaround.")
                 from sqlalchemy import text
                 try:
@@ -125,6 +132,7 @@ def get_document(
                         # Set chat_history in memory (not persisted, column doesn't exist)
                         document.chat_history = []
                 except Exception as sql_error:
+                    db.rollback()
                     logger.error(f"Raw SQL workaround also failed: {str(sql_error)}")
                     document = None
         else:
@@ -134,83 +142,134 @@ def get_document(
     
     if not document:
         # Create empty document if it doesn't exist
-        # Don't set chat_history in constructor - let it be None initially to avoid errors if column doesn't exist
-        try:
-            document = Document(
-                company_id=company_id,
-                type="vorhabensbeschreibung",
-                content_json={"sections": []}
-                # chat_history is not set here - will be initialized after creation if column exists
-            )
-            db.add(document)
-            db.commit()
-            db.refresh(document)
-        except ProgrammingError as create_error:
-            # Check if error is about chat_history column not existing
-            error_str = str(create_error.orig) if hasattr(create_error, 'orig') else str(create_error)
-            if 'chat_history' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
-                logger.warning(f"chat_history column does not exist. Creating document using raw SQL for company {company_id}")
-                db.rollback()
-                # Use raw SQL to insert without chat_history column
-                from sqlalchemy import text
-                try:
-                    result = db.execute(
-                        text("""
-                            INSERT INTO documents (company_id, type, content_json, updated_at)
-                            VALUES (:company_id, :doc_type, :content_json, NOW())
-                            RETURNING id, company_id, type, content_json, updated_at
-                        """),
-                        {
-                            "company_id": company_id,
-                            "doc_type": "vorhabensbeschreibung",
-                            "content_json": json.dumps({"sections": []})
-                        }
+        # If we know chat_history is missing, skip ORM and use raw SQL directly
+        if chat_history_missing:
+            logger.warning(f"chat_history column does not exist. Creating document using raw SQL for company {company_id}")
+            from sqlalchemy import text
+            try:
+                result = db.execute(
+                    text("""
+                        INSERT INTO documents (company_id, type, content_json, updated_at)
+                        VALUES (:company_id, :doc_type, :content_json, NOW())
+                        RETURNING id, company_id, type, content_json, updated_at
+                    """),
+                    {
+                        "company_id": company_id,
+                        "doc_type": "vorhabensbeschreibung",
+                        "content_json": json.dumps({"sections": []})
+                    }
+                )
+                row = result.first()
+                if row:
+                    # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
+                    content_json = row[3]
+                    if isinstance(content_json, str):
+                        content_json = json.loads(content_json)
+                    
+                    # Create Document object from inserted row
+                    document = Document(
+                        id=row[0],
+                        company_id=row[1],
+                        type=row[2],
+                        content_json=content_json,
+                        updated_at=row[4]
                     )
-                    row = result.first()
-                    if row:
-                        # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
-                        content_json = row[3]
-                        if isinstance(content_json, str):
-                            content_json = json.loads(content_json)
-                        
-                        # Create Document object from inserted row
-                        document = Document(
-                            id=row[0],
-                            company_id=row[1],
-                            type=row[2],
-                            content_json=content_json,
-                            updated_at=row[4]
-                        )
-                        # Make it transient to avoid SQLAlchemy tracking issues
-                        make_transient(document)
-                        # Set chat_history in memory only
-                        document.chat_history = []
-                        # Commit the raw SQL insert
-                        db.commit()
-                    else:
-                        raise HTTPException(
-                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail="Failed to create document: no row returned"
-                        )
-                except Exception as sql_error:
-                    db.rollback()
-                    logger.error(f"Failed to create document using raw SQL: {str(sql_error)}", exc_info=True)
+                    # Make it transient to avoid SQLAlchemy tracking issues
+                    make_transient(document)
+                    # Set chat_history in memory only
+                    document.chat_history = []
+                    # Commit the raw SQL insert
+                    db.commit()
+                else:
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Failed to create document: {str(sql_error)}"
+                        detail="Failed to create document: no row returned"
                     )
-            else:
-                # Re-raise if it's a different ProgrammingError
+            except Exception as sql_error:
                 db.rollback()
-                logger.error(f"Unexpected ProgrammingError during document creation: {str(create_error)}", exc_info=True)
-                raise
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Failed to create document for company {company_id}: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create document: {str(e)}"
-            )
+                logger.error(f"Failed to create document using raw SQL: {str(sql_error)}", exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to create document: {str(sql_error)}"
+                )
+        else:
+            # Normal ORM creation path (chat_history column exists)
+            try:
+                document = Document(
+                    company_id=company_id,
+                    type="vorhabensbeschreibung",
+                    content_json={"sections": []}
+                    # chat_history is not set here - will be initialized after creation if column exists
+                )
+                db.add(document)
+                db.commit()
+                db.refresh(document)
+            except ProgrammingError as create_error:
+                # Check if error is about chat_history column not existing
+                error_str = str(create_error.orig) if hasattr(create_error, 'orig') else str(create_error)
+                if 'chat_history' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
+                    logger.warning(f"chat_history column does not exist. Creating document using raw SQL for company {company_id}")
+                    db.rollback()
+                    # Use raw SQL to insert without chat_history column
+                    from sqlalchemy import text
+                    try:
+                        result = db.execute(
+                            text("""
+                                INSERT INTO documents (company_id, type, content_json, updated_at)
+                                VALUES (:company_id, :doc_type, :content_json, NOW())
+                                RETURNING id, company_id, type, content_json, updated_at
+                            """),
+                            {
+                                "company_id": company_id,
+                                "doc_type": "vorhabensbeschreibung",
+                                "content_json": json.dumps({"sections": []})
+                            }
+                        )
+                        row = result.first()
+                        if row:
+                            # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
+                            content_json = row[3]
+                            if isinstance(content_json, str):
+                                content_json = json.loads(content_json)
+                            
+                            # Create Document object from inserted row
+                            document = Document(
+                                id=row[0],
+                                company_id=row[1],
+                                type=row[2],
+                                content_json=content_json,
+                                updated_at=row[4]
+                            )
+                            # Make it transient to avoid SQLAlchemy tracking issues
+                            make_transient(document)
+                            # Set chat_history in memory only
+                            document.chat_history = []
+                            # Commit the raw SQL insert
+                            db.commit()
+                        else:
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail="Failed to create document: no row returned"
+                            )
+                    except Exception as sql_error:
+                        db.rollback()
+                        logger.error(f"Failed to create document using raw SQL: {str(sql_error)}", exc_info=True)
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Failed to create document: {str(sql_error)}"
+                        )
+                else:
+                    # Re-raise if it's a different ProgrammingError
+                    db.rollback()
+                    logger.error(f"Unexpected ProgrammingError during document creation: {str(create_error)}", exc_info=True)
+                    raise
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to create document for company {company_id}: {str(e)}", exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to create document: {str(e)}"
+                )
     
     # Ensure chat_history is initialized if null
     # Handle case where column might not exist yet (migration not run)
@@ -550,7 +609,8 @@ Geben Sie KEIN Markdown-Format, KEINE Erklärungen und KEINEN Text außerhalb de
                     }
                 ],
                 temperature=0.7,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                timeout=120.0  # 2 minute timeout for production safety
             )
             
             response_text = response.choices[0].message.content
@@ -1476,7 +1536,8 @@ WICHTIG:
                     "content": prompt
                 }
             ],
-            temperature=0.7
+            temperature=0.7,
+            timeout=120.0  # 2 minute timeout for production safety
         )
         
         generated_content = response.choices[0].message.content.strip()
@@ -1702,7 +1763,8 @@ Geben Sie NUR die Antwort zurück, ohne zusätzliche Erklärungen oder Formatier
                 }
             ],
             temperature=0.7,
-            max_tokens=1000  # Limit response length for concise answers
+            max_tokens=1000,  # Limit response length for concise answers
+            timeout=120.0  # 2 minute timeout for production safety
         )
         
         answer = response.choices[0].message.content.strip()
