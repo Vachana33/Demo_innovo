@@ -7,7 +7,9 @@ requests>=2.32.4
 beautifulsoup4==4.12.3
 openai==1.54.0
 python-dotenv==1.0.1
-pyjwt==2.9.0
+# Updated pyjwt to allow resolution with python-jose[cryptography]>=3.4.0
+# python-jose[cryptography] requires pyjwt[crypto] which needs pyjwt>=2.10.1
+pyjwt>=2.9.0
 python-jose[cryptography]>=3.4.0
 reportlab==4.0.7
 python-docx==1.1.0
