@@ -5,7 +5,7 @@ import os
 from urllib.parse import urlparse
 
 # Database URL - reads from environment variable
-# Production (Render): DATABASE_URL must be set to PostgreSQL connection string
+# Production (Supabase): DATABASE_URL must be set to Supabase PostgreSQL connection string
 # Local development: Falls back to SQLite if DATABASE_URL is not set
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./innovo.db")
 
@@ -24,13 +24,13 @@ if is_sqlite:
         connect_args={"check_same_thread": False}
     )
 elif is_postgres:
-    # PostgreSQL configuration for production (Render)
+    # PostgreSQL configuration for production (Supabase)
     # Production requires DATABASE_URL to be set to a PostgreSQL connection string
-    # Handle SSL for Render Postgres (required for secure connections)
+    # Handle SSL for Supabase Postgres (required for secure connections)
     connect_args = {}
     if "sslmode" not in DATABASE_URL.lower():
         connect_args["sslmode"] = "require"
-    
+
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,  # Verify connections before using (important for production)

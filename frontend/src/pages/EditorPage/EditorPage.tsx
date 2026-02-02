@@ -2,12 +2,23 @@ import { useParams } from "react-router-dom";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useAuth } from "../../contexts/AuthContext";
 import { apiGet, apiPut, apiPost, apiDownloadFile } from "../../utils/api";
+import MilestoneTable from "../../components/MilestoneTable";
 import styles from "./EditorPage.module.css";
 
 interface Section {
   id: string;
   title: string;
   content: string;
+  type?: "text" | "milestone_table";
+  milestone_data?: {
+    milestones: Array<{
+      milestone_number?: string;
+      expected_target?: string;
+      target_date?: string;
+      expected_expenditure?: number | null;
+    }>;
+    total_expenditure?: number | null;
+  };
 }
 
 type EditorMode = "reviewHeadings" | "confirmedHeadings" | "editingContent";
@@ -20,6 +31,46 @@ interface ChatMessage {
   messageId?: string; // For tracking which message needs confirmation
 }
 
+interface DocumentResponse {
+  id: number;
+  headings_confirmed?: boolean;
+  content_json?: {
+    sections?: Section[];
+  };
+  chat_history?: Array<{
+    role: string;
+    text: string;
+    suggestedContent?: Record<string, string>;
+    requiresConfirmation?: boolean;
+  }>;
+  company?: {
+    name?: string;
+    processing_status?: string;
+  };
+}
+
+interface ChatHistoryMessage {
+  role: string;
+  text: string;
+  suggestedContent?: Record<string, string>;
+  requiresConfirmation?: boolean;
+  messageId?: string;
+}
+
+interface CompanyResponse {
+  id: number;
+  name?: string;
+  processing_status?: string;
+}
+
+interface ContentGenerationResponse {
+  message: string;
+  updated_sections?: Record<string, string>;
+  content_json?: {
+    sections?: Section[];
+  };
+}
+
 export default function EditorPage() {
   const { companyId, docType } = useParams();
   const { logout } = useAuth();
@@ -30,6 +81,10 @@ export default function EditorPage() {
   const [companyName, setCompanyName] = useState<string>("Company");
   const [sections, setSections] = useState<Section[]>([]);
   const [editorMode, setEditorMode] = useState<EditorMode | null>(null);
+  const [headingsConfirmed, setHeadingsConfirmed] = useState<boolean>(false);  // Phase 2.6: Headings confirmation flag
+  const [editingSectionId, setEditingSectionId] = useState<string | null>(null);  // Phase 2.6: Section being renamed
+  const [editingSectionTitle, setEditingSectionTitle] = useState<string>("");  // Phase 2.6: Temporary title during rename
+  const [showAddSectionMenu, setShowAddSectionMenu] = useState<string | null>(null);  // Phase 2.6: Section ID for which to show add menu
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [documentId, setDocumentId] = useState<number | null>(null);
@@ -82,20 +137,47 @@ export default function EditorPage() {
 
       try {
         setIsLoading(true);
-        const data = await apiGet<any>(
-          `/documents/${companyIdNum}/vorhabensbeschreibung`
-        );
+        
+        // Get funding_program_id from URL params (passed from ProjectsPage)
+        const urlParams = new URLSearchParams(window.location.search);
+        const fundingProgramId = urlParams.get('funding_program_id');
+        
+        // Build URL with funding_program_id if available
+        let url = `/documents/${companyIdNum}/vorhabensbeschreibung`;
+        if (fundingProgramId) {
+          url += `?funding_program_id=${fundingProgramId}`;
+        }
+        
+        const data = await apiGet<DocumentResponse>(url);
         setDocumentId(data.id);
+        
+        // Phase 2.6: Load headings_confirmed flag
+        setHeadingsConfirmed(data.headings_confirmed || false);
         
         // Extract sections from content_json
         let loadedSections: Section[] = [];
         if (data.content_json && data.content_json.sections) {
           loadedSections = data.content_json.sections;
           setSections(loadedSections);
-          // Determine mode: if sections have content, we're in editingContent mode, otherwise reviewHeadings mode
+          // Determine mode: if TEXT sections have content, we're in editingContent mode, otherwise reviewHeadings mode
+          // Milestone tables don't count as "content" for mode determination - they can be empty and still need heading confirmation
           if (loadedSections.length > 0) {
-            const hasContent = loadedSections.some((s: Section) => s.content && s.content.trim() !== "");
-            setEditorMode(hasContent ? "editingContent" : "reviewHeadings");
+            const hasTextContent = loadedSections.some((s: Section) => {
+              // Only check text sections, ignore milestone tables for mode determination
+              if (s.type === "milestone_table") {
+                return false; // Milestone tables don't determine mode
+              }
+              // For text sections, check if content exists
+              return s.content && s.content.trim() !== "";
+            });
+            
+            // If headings are already confirmed, go directly to confirmedHeadings mode
+            // Otherwise, determine mode based on content
+            if (data.headings_confirmed) {
+              setEditorMode("confirmedHeadings");
+            } else {
+              setEditorMode(hasTextContent ? "editingContent" : "reviewHeadings");
+            }
           } else {
             setEditorMode(null);
           }
@@ -107,7 +189,7 @@ export default function EditorPage() {
         // Load chat history if available
         if (data.chat_history && Array.isArray(data.chat_history)) {
           if (data.chat_history.length > 0) {
-            const loadedMessages: ChatMessage[] = data.chat_history.map((msg: any) => ({
+            const loadedMessages: ChatMessage[] = data.chat_history.map((msg: ChatHistoryMessage) => ({
               role: msg.role as "user" | "assistant",
               text: msg.text,
               suggestedContent: msg.suggestedContent,
@@ -137,12 +219,12 @@ export default function EditorPage() {
         }
         
         // Fetch company data including processing status
-        const companyData = await apiGet<any>(`/companies/${companyIdNum}`);
-        setCompanyName(companyData.name);
+        const companyData = await apiGet<CompanyResponse>(`/companies/${companyIdNum}`);
+        setCompanyName(companyData.name || "Company");
         setCompanyProcessingStatus(companyData.processing_status || "pending");
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Error loading document:", error);
-        if (error.message.includes("Authentication required")) {
+        if (error instanceof Error && error.message.includes("Authentication required")) {
           logout();
         }
       } finally {
@@ -171,9 +253,9 @@ export default function EditorPage() {
             sections: sectionsToSave,
           },
         });
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Error saving document:", error);
-        if (error.message.includes("Authentication required")) {
+        if (error instanceof Error && error.message.includes("Authentication required")) {
           logout();
         }
       } finally {
@@ -266,13 +348,18 @@ export default function EditorPage() {
    * When editor mode changes to confirmedHeadings, check if company processing is needed.
    * If processing is not complete, automatically start polling.
    * This ensures readiness is checked as soon as headings are confirmed.
+   * 
+   * NOTE: This is handled in handleConfirmHeadings() directly to avoid duplicate calls.
+   * This useEffect is kept as a safety net but should not trigger if handleConfirmHeadings already handled it.
    */
   useEffect(() => {
-    if (editorMode === "confirmedHeadings" && companyIdNum && !isCheckingReadiness) {
+    // Only trigger if we're in confirmedHeadings mode AND not already checking
+    // AND not already polling (to avoid duplicate polling)
+    if (editorMode === "confirmedHeadings" && companyIdNum && !isCheckingReadiness && !pollingIntervalRef.current) {
       // Check current status
       checkCompanyProcessingStatus().then((status) => {
-        // If not ready, start polling
-        if (status !== "done" && status !== "failed") {
+        // If not ready, start polling (only if not already polling)
+        if (status !== "done" && status !== "failed" && !pollingIntervalRef.current) {
           startProcessingStatusPoll();
         }
       });
@@ -280,213 +367,7 @@ export default function EditorPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editorMode, companyIdNum]);
 
-  // Convert JSON template to numbered sections
-  function generateSectionsFromTemplate(template: any): Section[] {
-    const sections: Section[] = [];
-    const parentCounters: Record<string, number> = {};
-    
-    // Extract the Vorhabensbeschreibung object
-    const vorhaben = template.Vorhabensbeschreibung || template;
-    
-    function processNode(key: string, value: any, parentId: string = ""): void {
-      // Skip arrays (they're placeholders, not sections)
-      if (Array.isArray(value)) {
-        return;
-      }
-      
-      // Extract section number from key (e.g., "1_Angaben_zum_Unternehmen" -> "1")
-      const numberMatch = key.match(/^(\d+)_/);
-      let sectionNumber: string = "";
-      let title: string = "";
-      let shouldCreateSection = true;
-      
-      if (numberMatch) {
-        // Key starts with number (main section like "1_Angaben_zum_Unternehmen")
-        sectionNumber = numberMatch[1];
-        title = key.replace(/^\d+_/, "").replace(/_/g, " ");
-      } else if (key === "Titelblock") {
-        // Special case: Titelblock is section 0
-        sectionNumber = "0";
-        title = "Titelblock";
-      } else if (typeof value === "object" && value !== null) {
-        // Nested object without number prefix (like "SWOT_Analyse")
-        // This becomes a subsection
-        const counter = (parentCounters[parentId] || 0) + 1;
-        parentCounters[parentId] = counter;
-        sectionNumber = counter.toString();
-        title = key.replace(/_/g, " ");
-      } else if (typeof value === "string") {
-        // String field (like "Firmengeschichte") - becomes a subsection
-        const counter = (parentCounters[parentId] || 0) + 1;
-        parentCounters[parentId] = counter;
-        sectionNumber = counter.toString();
-        title = key.replace(/_/g, " ");
-      } else {
-        shouldCreateSection = false;
-      }
-      
-      if (shouldCreateSection && sectionNumber && title) {
-        const fullId = parentId ? `${parentId}.${sectionNumber}` : sectionNumber;
-        
-        // Create section
-        sections.push({
-          id: fullId,
-          title: `${fullId}. ${title}`,
-          content: ""
-        });
-        
-        // Initialize counter for this section
-        parentCounters[fullId] = 0;
-        
-        // Process nested objects (but not arrays or strings)
-        if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-          Object.keys(value).forEach(subKey => {
-            processNode(subKey, value[subKey], fullId);
-          });
-        }
-      }
-    }
-    
-    // Sort keys to process in order (Titelblock first, then numbered sections)
-    const sortedKeys = Object.keys(vorhaben).sort((a, b) => {
-      // Titelblock comes first
-      if (a === "Titelblock") return -1;
-      if (b === "Titelblock") return 1;
-      
-      // Extract numbers for comparison
-      const aMatch = a.match(/^(\d+)_/);
-      const bMatch = b.match(/^(\d+)_/);
-      
-      if (aMatch && bMatch) {
-        return parseInt(aMatch[1]) - parseInt(bMatch[1]);
-      }
-      return a.localeCompare(b);
-    });
-    
-    // Process all top-level keys in order
-    sortedKeys.forEach(key => {
-      processNode(key, vorhaben[key]);
-    });
-    
-    return sections;
-  }
 
-  function handleCreateHeadings() {
-    // Full Vorhabensbeschreibung template
-    const template = {
-      "Vorhabensbeschreibung": {
-        "Titelblock": {
-          "Projekttitel": "",
-          "Aktenzeichen_oder_Anlage": "",
-          "Foerderprogramm": "",
-          "Projekttraeger": "",
-          "Datum": ""
-        },
-        "1_Angaben_zum_Unternehmen": {
-          "Firmengeschichte": "",
-          "Unternehmensprofil": "",
-          "Branche_und_Leistungsangebot": "",
-          "Standort": "",
-          "Team_und_Personalstruktur": "",
-          "Zertifizierungen_und_Qualitaetsstandards": "",
-          "Technologische_Ausgangslage": "",
-          "SWOT_Analyse": {
-            "Strengths": "",
-            "Weaknesses": "",
-            "Opportunities": "",
-            "Threats": ""
-          }
-        },
-        "2_Ausgangssituation_und_Problemstellung": {
-          "Ausgangssituation": "",
-          "Problemstellung": "",
-          "Markt_und_Wettbewerbssituation": "",
-          "Stand_der_Technik": "",
-          "Schutzrechte_und_Patentanalyse": "",
-          "Benchmarking_und_Vergleichsanalysen": "",
-          "Relevante_Regulatorische_Rahmenbedingungen": "",
-          "Warum_Handlungsbedarf_besteht": ""
-        },
-        "3_Ziele_des_Vorhabens": {
-          "Gesamtziel": "",
-          "Technologische_Ziele": "",
-          "Wirtschaftliche_Ziele": "",
-          "Innovationsgehalt_und_Neuheitsgrad": "",
-          "Nutzen_und_Mehrwert_fuer_Kunden_und_Markt": "",
-          "Strategische_Relevanz_fuer_das_Unternehmen": ""
-        },
-        "4_Projektbeschreibung_und_Technischer_Loesungsansatz": {
-          "Projektbeschreibung": "",
-          "Technischer_Loesungsansatz": "",
-          "Technologie_und_Systemuebersicht": "",
-          "Hardwarekonzept": "",
-          "Softwarekonzept": "",
-          "Schnittstellen_und_Integration": "",
-          "Konstruktionsgrundsaetze_und_Designvorgaben": "",
-          "Simulations_und_Berechnungsansaetze": "",
-          "Lastenheft_und_Anforderungskatalog": ""
-        },
-        "5_Innovationsbeschreibung": {
-          "Beschreibung_der_Innovation": "",
-          "Abgrenzung_zum_Stand_der_Technik": "",
-          "Wissenschaftliche_und_Technische_Neuheit": "",
-          "Potenzielle_Schutzfaehigkeit": "",
-          "Uebertragbarkeit_und_Modularitaet": ""
-        },
-        "6_Arbeitspakete": {
-          "Uebersicht_aller_APs": "",
-          "APs": [{}]
-        },
-        "7_Projektkalkulation": {
-          "Gesamtkosten": "",
-          "Geplanter_Beratungsumfang": "",
-          "Material_und_Entwicklungskosten": "",
-          "Externe_Dienstleistungen": "",
-          "Investitionsbedarf": ""
-        },
-        "8_Zeit_und_Meilensteinplanung": {
-          "Gesamtprojektlaufzeit": "",
-          "Projektphasen": "",
-          "Meilensteine": [],
-          "Abhaengigkeiten_zwischen_APs": ""
-        },
-        "9_Vernetzung_und_Wertschoepfungskette": {
-          "Kooperationen": "",
-          "Technologie_und_Wissenstransfer": "",
-          "Einbettung_in_die_Wertschoepfungskette": ""
-        },
-        "10_Risikoanalyse": {
-          "Technische_Risiken": "",
-          "Wirtschaftliche_Risiken": "",
-          "Regulatorische_Risiken": "",
-          "Massnahmen_zur_Risikominimierung": ""
-        },
-        "11_Notwendigkeit_des_WTT_Vorhabens": {
-          "Begruendung_der_Notwendigkeit": "",
-          "Warum_ohne_Foerderung_nicht_realiserbar": ""
-        },
-        "12_Ergebnisverwertung_und_Nutzen": {
-          "Technischer_Nutzen": "",
-          "Wirtschaftlicher_Nutzen": "",
-          "Verwertungskonzept": ""
-        },
-        "13_Regulatorische_und_Qualitaetsanforderungen": {
-          "Normen_und_Standards": "",
-          "Dokumentationspflichten": ""
-        },
-        "14_Anhang": {
-          "Technische_Zeichnungen": "",
-          "Simulationen": "",
-          "Weitere_Unterlagen": ""
-        }
-      }
-    };
-    
-    const generated = generateSectionsFromTemplate(template);
-    setSections(generated);
-    setEditorMode("reviewHeadings");
-    // Document will be saved automatically via useEffect
-  }
 
   /**
    * Check company processing status by fetching latest company data.
@@ -496,11 +377,11 @@ export default function EditorPage() {
     if (!companyIdNum) return "pending";
     
     try {
-      const companyData = await apiGet<any>(`/companies/${companyIdNum}`);
+      const companyData = await apiGet<CompanyResponse>(`/companies/${companyIdNum}`);
       const status = companyData.processing_status || "pending";
       setCompanyProcessingStatus(status);
       return status;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error checking company processing status:", error);
       return companyProcessingStatus || "pending";
     }
@@ -513,9 +394,10 @@ export default function EditorPage() {
   function startProcessingStatusPoll() {
     if (!companyIdNum) return;
     
-    // Clear any existing polling interval
+    // Prevent duplicate polling - if already polling, don't start another
     if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
+      console.log("Polling already in progress, skipping duplicate start");
+      return;
     }
     
     setIsCheckingReadiness(true);
@@ -535,7 +417,7 @@ export default function EditorPage() {
       }
     }, 2000);
     
-    // Also check immediately
+    // Also check immediately (but only once)
     checkCompanyProcessingStatus();
   }
 
@@ -556,19 +438,151 @@ export default function EditorPage() {
    * This ensures content generation button only appears when safe.
    */
   async function handleConfirmHeadings() {
-    setEditorMode("confirmedHeadings");
-    // Document will be saved automatically via useEffect
-    
-    // Check current processing status
-    const currentStatus = await checkCompanyProcessingStatus();
-    
-    // If processing is not complete, start polling
-    // This handles cases where:
-    // - Company was just created and processing is still running
-    // - Processing is in "pending" or "processing" state
-    if (currentStatus !== "done" && currentStatus !== "failed") {
-      startProcessingStatusPoll();
+    if (!documentId) {
+      alert("Document ID not found. Please reload the page.");
+      return;
     }
+    
+    // Prevent duplicate calls
+    if (isLoading || headingsConfirmed) {
+      console.log("Already processing or headings already confirmed");
+      return;
+    }
+    
+    try {
+      setIsLoading(true);
+      
+      // Phase 2.6: Call backend to confirm headings
+      await apiPost(`/documents/${documentId}/confirm-headings`);
+      setHeadingsConfirmed(true);
+      
+      // Check current processing status BEFORE changing editor mode
+      // This prevents the useEffect from also triggering polling
+      const currentStatus = await checkCompanyProcessingStatus();
+      
+      // If processing is not complete, start polling
+      // This handles cases where:
+      // - Company was just created and processing is still running
+      // - Processing is in "pending" or "processing" state
+      if (currentStatus !== "done" && currentStatus !== "failed") {
+        startProcessingStatusPoll();
+      }
+      
+      // Set editor mode AFTER checking status to avoid duplicate polling
+      setEditorMode("confirmedHeadings");
+    } catch (error: unknown) {
+      console.error("Error confirming headings:", error);
+      const errorMsg = error instanceof Error ? error.message : "Failed to confirm headings";
+      alert(errorMsg);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+  
+  // Phase 2.6: Rename section handlers
+  function handleStartRenameSection(section: Section) {
+    if (headingsConfirmed) {
+      // Should not happen due to UI, but defensive check
+      return;
+    }
+    setEditingSectionId(section.id);
+    setEditingSectionTitle(section.title);
+  }
+
+  function handleCancelRename() {
+    setEditingSectionId(null);
+    setEditingSectionTitle("");
+  }
+
+  function handleSaveRenameSection(sectionId: string) {
+    if (headingsConfirmed) {
+      return; // Defensive check
+    }
+    
+    const updatedSections = sections.map(s => 
+      s.id === sectionId 
+        ? { ...s, title: editingSectionTitle }
+        : s
+    );
+    
+    setSections(updatedSections);
+    setEditingSectionId(null);
+    setEditingSectionTitle("");
+    // Document will be saved automatically via useEffect
+  }
+  
+  // Phase 2.6: Generate new section ID
+  function generateNewSectionId(currentSectionId: string, isMainSection: boolean): string {
+    if (isMainSection) {
+      // Find highest top-level section number
+      const topLevelSections = sections.filter(s => s.id.split('.').length === 1);
+      const maxNumber = topLevelSections.reduce((max, s) => {
+        const num = parseInt(s.id, 10);
+        return num > max ? num : max;
+      }, 0);
+      return (maxNumber + 1).toString();
+    } else {
+      // For sub-section: find parent ID and highest sub-section number under that parent
+      const parts = currentSectionId.split('.');
+      const currentDepth = parts.length;
+      
+      // If current section is top-level (e.g., "2"), parent is itself, create first sub-section "2.1"
+      // If current section is sub-level (e.g., "2.3"), parent is "2", create "2.4"
+      const parentId = currentDepth === 1 ? currentSectionId : parts.slice(0, -1).join('.');
+      
+      // Find all sub-sections under this parent (same depth as what we're creating)
+      const targetDepth = currentDepth === 1 ? 2 : currentDepth; // If adding to top-level, create depth 2; otherwise same depth
+      const subSections = sections.filter(s => {
+        const sParts = s.id.split('.');
+        return sParts.length === targetDepth && 
+               sParts.slice(0, -1).join('.') === parentId;
+      });
+      
+      const maxNumber = subSections.reduce((max, s) => {
+        const lastPart = parseInt(s.id.split('.').pop() || '0', 10);
+        return lastPart > max ? lastPart : max;
+      }, 0);
+      
+      return `${parentId}.${maxNumber + 1}`;
+    }
+  }
+  
+  // Phase 2.6: Add new section below current section
+  function handleAddSectionBelow(sectionId: string, isMainSection: boolean) {
+    if (headingsConfirmed) {
+      return; // Defensive check
+    }
+    
+    // Find current section index
+    const currentIndex = sections.findIndex(s => s.id === sectionId);
+    if (currentIndex === -1) return;
+    
+    // Generate new section ID
+    const newSectionId = generateNewSectionId(sectionId, isMainSection);
+    
+    // Create new section
+    const newSection: Section = {
+      id: newSectionId,
+      title: `${newSectionId}. `,  // Empty title, user can edit
+      content: "",
+      type: "text"
+    };
+    
+    // Insert after current section
+    const updatedSections = [
+      ...sections.slice(0, currentIndex + 1),
+      newSection,
+      ...sections.slice(currentIndex + 1)
+    ];
+    
+    setSections(updatedSections);
+    setShowAddSectionMenu(null);
+    
+    // Auto-start editing the new section title
+    setEditingSectionId(newSectionId);
+    setEditingSectionTitle(newSection.title);
+    
+    // Document will be saved automatically via useEffect
   }
 
   function handleDeleteHeading(id: string) {
@@ -815,8 +829,8 @@ export default function EditorPage() {
           
           console.log(`Successfully confirmed edit for section ${sectionId}:`, response);
           updatedSectionIds.push(sectionId);
-        } catch (error: any) {
-          const errorMsg = error.message || error.toString() || "Unknown error";
+        } catch (error: unknown) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
           console.error(`Failed to confirm edit for section ${sectionId}:`, error);
           console.error(`Error details:`, errorMsg);
           errors.push(`Section ${sectionId}: ${errorMsg}`);
@@ -846,7 +860,7 @@ export default function EditorPage() {
       // Fetch updated document
       try {
         console.log(`Fetching updated document after confirming ${updatedSectionIds.length} section(s)`);
-        const updatedDocument = await apiGet<any>(
+        const updatedDocument = await apiGet<DocumentResponse>(
           `/documents/${companyIdNum}/vorhabensbeschreibung`
         );
         
@@ -912,19 +926,19 @@ export default function EditorPage() {
             text: "Fehler: Aktualisiertes Dokument hat keine Abschnitte. Bitte aktualisieren Sie die Seite."
           }]);
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Error fetching updated document:", error);
         clearPreview();
         setChatMessages(prev => [...prev, {
           role: "assistant",
-          text: `Änderungen wurden gespeichert, aber es gab einen Fehler beim Aktualisieren der Ansicht: ${error.message || "Unknown error"}. Bitte aktualisieren Sie die Seite.`
+          text: `Änderungen wurden gespeichert, aber es gab einen Fehler beim Aktualisieren der Ansicht: ${error instanceof Error ? error.message : "Unknown error"}. Bitte aktualisieren Sie die Seite.`
         }]);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error approving edit:", error);
       setChatMessages(prev => [...prev, {
         role: "assistant",
-        text: error.message || "Fehler beim Bestätigen der Änderungen. Bitte versuchen Sie es erneut."
+        text: error instanceof Error ? error.message : "Fehler beim Bestätigen der Änderungen. Bitte versuchen Sie es erneut."
       }]);
     } finally {
       setIsChatLoading(false);
@@ -932,7 +946,7 @@ export default function EditorPage() {
   }
 
   // Handle reject edit - discard preview
-  function handleRejectEdit(_messageId: string) {
+  function handleRejectEdit() {
     // Clear preview
     clearPreview();
     
@@ -1102,7 +1116,7 @@ export default function EditorPage() {
         
         try {
           console.log("Fetching updated document after chat response...");
-          const updatedDocument = await apiGet<any>(
+          const updatedDocument = await apiGet<DocumentResponse>(
             `/documents/${companyIdNum}/vorhabensbeschreibung`
           );
           
@@ -1131,24 +1145,24 @@ export default function EditorPage() {
             console.warn("Updated document has no sections in content_json");
             isUpdatingFromChat.current = false;
           }
-        } catch (error: any) {
+        } catch (error: unknown) {
           console.error("Error fetching updated document:", error);
           isUpdatingFromChat.current = false;
           // Don't show error to user - the chat response already indicates success
           // The sections will be updated on next document load
         }
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error sending chat message:", error);
       
       // Show error message in chat
-      const errorMessage = error.message || "Failed to process your request. Please try again.";
+      const errorMessage = error instanceof Error ? error.message : "Failed to process your request. Please try again.";
       setChatMessages(prev => [...prev, { 
         role: "assistant", 
         text: errorMessage 
       }]);
       
-      if (error.message.includes("Authentication required")) {
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
@@ -1169,6 +1183,12 @@ export default function EditorPage() {
       return;
     }
 
+    // Prevent duplicate calls - if already loading, don't start another generation
+    if (isLoading) {
+      console.log("Content generation already in progress, ignoring duplicate call");
+      return;
+    }
+
     // Double-check readiness before making request
     // This is a safety check - button should already be disabled if not ready
     if (!isContentReady) {
@@ -1186,7 +1206,7 @@ export default function EditorPage() {
 
     try {
       setIsLoading(true);
-      const updatedDocument = await apiPost<any>(
+      const updatedDocument = await apiPost<ContentGenerationResponse>(
         `/documents/${documentId}/generate-content`
       );
       
@@ -1199,13 +1219,13 @@ export default function EditorPage() {
       } else {
         throw new Error("Generated document has no sections");
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error generating content:", error);
       
       // Handle specific "preprocessing not finished" error gracefully
       // This should rarely happen due to readiness checks, but handle it if it does
-      if (error.message.includes("preprocessing not finished") || 
-          error.message.includes("Company preprocessing not finished")) {
+      if (error instanceof Error && (error.message.includes("preprocessing not finished") || 
+          error.message.includes("Company preprocessing not finished"))) {
         // Don't show disruptive popup - start polling and show inline message
         if (!isCheckingReadiness) {
           startProcessingStatusPoll();
@@ -1215,8 +1235,9 @@ export default function EditorPage() {
       }
       
       // For other errors, show alert (these are unexpected)
-      alert(`Failed to generate content: ${error.message || "Unknown error"}`);
-      if (error.message.includes("Authentication required")) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      alert(`Failed to generate content: ${errorMsg}`);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
@@ -1307,9 +1328,10 @@ export default function EditorPage() {
                       a.click();
                       window.URL.revokeObjectURL(url);
                       document.body.removeChild(a);
-                    } catch (error: any) {
+                    } catch (error: unknown) {
                       console.error("Export error:", error);
-                      alert(`Failed to export PDF: ${error.message || "Unknown error"}`);
+                      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+                      alert(`Failed to export PDF: ${errorMsg}`);
                     }
                   }}
                 >
@@ -1334,9 +1356,10 @@ export default function EditorPage() {
                       a.click();
                       window.URL.revokeObjectURL(url);
                       document.body.removeChild(a);
-                    } catch (error: any) {
+                    } catch (error: unknown) {
                       console.error("Export error:", error);
-                      alert(`Failed to export DOCX: ${error.message || "Unknown error"}`);
+                      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+                      alert(`Failed to export DOCX: ${errorMsg}`);
                     }
                   }}
                 >
@@ -1363,38 +1386,184 @@ export default function EditorPage() {
                 {sections.map((s) => {
                   const depth = s.id.split(".").length;
                   const isTopLevel = depth === 1;
+                  const isEditing = editingSectionId === s.id;
+                  
                   return (
                     <div
                       key={s.id}
                       ref={(el) => { sectionRefs.current[s.id] = el; }}
                       className={`${styles.sectionBlock} ${isTopLevel ? styles.headingRowLevel1 : styles.headingRowLevel2}`}
-                      style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
+                      style={{ marginBottom: "0.8rem" }}
                     >
-                      <span style={{ minWidth: "60px", fontSize: isTopLevel ? "0.95rem" : "0.85rem", fontWeight: isTopLevel ? "600" : "400" }}>
-                        {s.id}.
-                      </span>
-                      <span style={{ 
-                        flex: 1, 
-                        fontSize: isTopLevel ? "1rem" : "0.9rem",
-                        fontWeight: isTopLevel ? "600" : "400",
-                        paddingLeft: depth > 1 ? `${(depth - 1) * 1.2}rem` : "0"
-                      }}>
-                        {s.title.replace(/^[\d.]+\.\s*/, "")}
-                      </span>
-                      <button
-                        onClick={() => handleDeleteHeading(s.id)}
-                        style={{
-                          padding: "0.2rem 0.5rem",
-                          border: "1px solid #b32020",
-                          backgroundColor: "#fff",
-                          color: "#b32020",
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                          fontSize: "0.8rem"
-                        }}
-                      >
-                        ❌
-                      </button>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                        <span style={{ minWidth: "60px", fontSize: isTopLevel ? "0.95rem" : "0.85rem", fontWeight: isTopLevel ? "600" : "400" }}>
+                          {s.id}.
+                        </span>
+                        {isEditing ? (
+                          <>
+                            <input
+                              type="text"
+                              value={editingSectionTitle}
+                              onChange={(e) => setEditingSectionTitle(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  handleSaveRenameSection(s.id);
+                                } else if (e.key === "Escape") {
+                                  handleCancelRename();
+                                }
+                              }}
+                              autoFocus
+                              style={{
+                                flex: 1,
+                                padding: "0.3rem 0.5rem",
+                                border: "1px solid var(--brand-border)",
+                                borderRadius: "4px",
+                                fontSize: isTopLevel ? "1rem" : "0.9rem"
+                              }}
+                            />
+                            <button
+                              onClick={() => handleSaveRenameSection(s.id)}
+                              style={{
+                                padding: "0.2rem 0.5rem",
+                                backgroundColor: "var(--brand-primary)",
+                                color: "white",
+                                border: "none",
+                                borderRadius: "4px",
+                                cursor: "pointer",
+                                fontSize: "0.8rem"
+                              }}
+                            >
+                              ✓
+                            </button>
+                            <button
+                              onClick={handleCancelRename}
+                              style={{
+                                padding: "0.2rem 0.5rem",
+                                backgroundColor: "#ccc",
+                                color: "white",
+                                border: "none",
+                                borderRadius: "4px",
+                                cursor: "pointer",
+                                fontSize: "0.8rem"
+                              }}
+                            >
+                              ✕
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <span style={{ 
+                              flex: 1, 
+                              fontSize: isTopLevel ? "1rem" : "0.9rem",
+                              fontWeight: isTopLevel ? "600" : "400",
+                              paddingLeft: depth > 1 ? `${(depth - 1) * 1.2}rem` : "0"
+                            }}>
+                              {s.title.replace(/^[\d.]+\.\s*/, "")}
+                            </span>
+                            {!headingsConfirmed && (
+                              <button
+                                onClick={() => handleStartRenameSection(s)}
+                                style={{
+                                  padding: "0.2rem 0.5rem",
+                                  border: "1px solid var(--brand-primary)",
+                                  backgroundColor: "#fff",
+                                  color: "var(--brand-primary)",
+                                  borderRadius: "4px",
+                                  cursor: "pointer",
+                                  fontSize: "0.8rem"
+                                }}
+                                title="Rename section"
+                              >
+                                ✏️
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleDeleteHeading(s.id)}
+                              disabled={headingsConfirmed}
+                              style={{
+                                padding: "0.2rem 0.5rem",
+                                border: "1px solid #b32020",
+                                backgroundColor: "#fff",
+                                color: "#b32020",
+                                borderRadius: "4px",
+                                cursor: headingsConfirmed ? "not-allowed" : "pointer",
+                                fontSize: "0.8rem",
+                                opacity: headingsConfirmed ? 0.5 : 1
+                              }}
+                              title={headingsConfirmed ? "Headings are locked" : "Delete section"}
+                            >
+                              ❌
+                            </button>
+                          </>
+                        )}
+                      </div>
+                      {/* Phase 2.6: Add section below button */}
+                      {!headingsConfirmed && (
+                        <div style={{ marginTop: "0.5rem", paddingLeft: "60px" }}>
+                          {showAddSectionMenu === s.id ? (
+                            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                              <button
+                                onClick={() => handleAddSectionBelow(s.id, true)}
+                                style={{
+                                  padding: "0.3rem 0.6rem",
+                                  border: "1px solid var(--brand-primary)",
+                                  backgroundColor: "#fff",
+                                  color: "var(--brand-primary)",
+                                  borderRadius: "4px",
+                                  cursor: "pointer",
+                                  fontSize: "0.85rem"
+                                }}
+                              >
+                                + Main Section
+                              </button>
+                              <button
+                                onClick={() => handleAddSectionBelow(s.id, false)}
+                                style={{
+                                  padding: "0.3rem 0.6rem",
+                                  border: "1px solid var(--brand-primary)",
+                                  backgroundColor: "#fff",
+                                  color: "var(--brand-primary)",
+                                  borderRadius: "4px",
+                                  cursor: "pointer",
+                                  fontSize: "0.85rem"
+                                }}
+                              >
+                                + Sub-section
+                              </button>
+                              <button
+                                onClick={() => setShowAddSectionMenu(null)}
+                                style={{
+                                  padding: "0.3rem 0.6rem",
+                                  border: "1px solid #ccc",
+                                  backgroundColor: "#fff",
+                                  color: "#666",
+                                  borderRadius: "4px",
+                                  cursor: "pointer",
+                                  fontSize: "0.85rem"
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => setShowAddSectionMenu(s.id)}
+                              style={{
+                                padding: "0.3rem 0.6rem",
+                                border: "1px solid #28a745",
+                                backgroundColor: "#fff",
+                                color: "#28a745",
+                                borderRadius: "4px",
+                                cursor: "pointer",
+                                fontSize: "0.85rem"
+                              }}
+                              title="Add section below"
+                            >
+                              + Add section below
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1402,9 +1571,14 @@ export default function EditorPage() {
                   <button
                     onClick={handleConfirmHeadings}
                     className={styles.fillContentBtn}
-                    style={{ width: "100%" }}
+                    style={{ 
+                      width: "100%",
+                      cursor: headingsConfirmed ? "not-allowed" : "pointer",
+                      opacity: headingsConfirmed ? 0.6 : 1
+                    }}
+                    disabled={headingsConfirmed || isLoading}
                   >
-                    Confirm Headings
+                    {headingsConfirmed ? "Headings Confirmed" : isLoading ? "Processing..." : "Confirm Headings"}
                   </button>
                 </div>
               </>
@@ -1417,20 +1591,54 @@ export default function EditorPage() {
                     <div
                       key={s.id}
                       ref={(el) => { sectionRefs.current[s.id] = el; }}
-                      className={`${styles.sectionBlock} ${isTopLevel ? styles.headingRowLevel1 : styles.headingRowLevel2}`}
-                      style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
+                      className={styles.sectionBlock}
                     >
-                      <span style={{ minWidth: "60px", fontSize: isTopLevel ? "0.95rem" : "0.85rem", fontWeight: isTopLevel ? "600" : "400" }}>
-                        {s.id}.
-                      </span>
-                      <span style={{ 
-                        flex: 1, 
-                        fontSize: isTopLevel ? "1rem" : "0.9rem",
-                        fontWeight: isTopLevel ? "600" : "400",
-                        paddingLeft: depth > 1 ? `${(depth - 1) * 1.2}rem` : "0"
-                      }}>
-                        {s.title.replace(/^[\d.]+\.\s*/, "")}
-                      </span>
+                      <div 
+                        className={styles.sectionTitle}
+                        style={{
+                          fontWeight: isTopLevel ? "600" : "400",
+                          fontSize: isTopLevel ? "1.1rem" : "0.95rem",
+                          marginBottom: isTopLevel ? "0.6rem" : "0.4rem",
+                          cursor: "default",
+                          userSelect: "none",  // Phase 2.6: Read-only after confirmation
+                          paddingLeft: depth > 1 ? `${(depth - 1) * 1.2}rem` : "0"
+                        }}
+                      >
+                        {s.title}
+                      </div>
+                      {/* Show content boxes in confirmedHeadings mode */}
+                      {/* Section 4.1 should ALWAYS be a milestone table, regardless of type field or content */}
+                      {s.id === "4.1" ? (
+                        <MilestoneTable
+                          sectionId={s.id}
+                          content={s.content}
+                          onContentChange={(newContent) => {
+                            setSections((prev) =>
+                              prev.map((sec) =>
+                                sec.id === s.id
+                                  ? { ...sec, content: newContent, type: "milestone_table" }
+                                  : sec
+                              )
+                            );
+                          }}
+                        />
+                      ) : (
+                        <textarea
+                          className={styles.textArea}
+                          value={s.content}
+                          onChange={(e) =>
+                            setSections((prev) =>
+                              prev.map((sec) =>
+                                sec.id === s.id
+                                  ? { ...sec, content: e.target.value }
+                                  : sec
+                              )
+                            )
+                          }
+                          placeholder="AI will fill this section, or you can write manually…"
+                          disabled={false} // Allow manual editing even before content generation
+                        />
+                      )}
                     </div>
                   );
                 })}
@@ -1522,20 +1730,39 @@ export default function EditorPage() {
                         </div>
                       </div>
                     ) : (
-                      <textarea
-                        className={styles.textArea}
-                        value={s.content}
-                        onChange={(e) =>
-                          setSections((prev) =>
-                            prev.map((sec) =>
-                              sec.id === s.id
-                                ? { ...sec, content: e.target.value }
-                                : sec
+                      // Section 4.1 should ALWAYS be a milestone table, regardless of type field or content
+                      // Other sections use type field or content structure to determine
+                      (s.id === "4.1" || s.type === "milestone_table") ? (
+                        <MilestoneTable
+                          sectionId={s.id}
+                          content={s.content}
+                          onContentChange={(newContent) => {
+                            setSections((prev) =>
+                              prev.map((sec) =>
+                                sec.id === s.id
+                                  ? { ...sec, content: newContent, type: "milestone_table" }
+                                  : sec
+                              )
+                            );
+                          }}
+                        />
+                      ) : (
+                        // Regular text section
+                        <textarea
+                          className={styles.textArea}
+                          value={s.content}
+                          onChange={(e) =>
+                            setSections((prev) =>
+                              prev.map((sec) =>
+                                sec.id === s.id
+                                  ? { ...sec, content: e.target.value }
+                                  : sec
+                              )
                             )
-                          )
-                        }
-                        placeholder="AI will fill this section, or you can write manually…"
-                      />
+                          }
+                          placeholder="AI will fill this section, or you can write manually…"
+                        />
+                      )
                     )}
                   </div>
                 );
@@ -1554,16 +1781,8 @@ export default function EditorPage() {
                   {editorMode === null && (
                     <div>
                       <p className={styles.textHint}>
-                        Click <strong>AI: Create Headings</strong> to generate the document structure. I'll then
-                        help you refine the structure or fill the content.
+                        Document structure is automatically created from the template. You can now refine the structure or fill the content.
                       </p>
-                      <button
-                        onClick={handleCreateHeadings}
-                        className={styles.createHeadingsBtn}
-                        style={{ marginTop: "1rem" }}
-                      >
-                        AI: Create Headings
-                      </button>
                     </div>
                   )}
 
@@ -1691,7 +1910,7 @@ export default function EditorPage() {
                             Approve
                           </button>
                           <button
-                            onClick={() => handleRejectEdit(msg.messageId!)}
+                            onClick={() => handleRejectEdit()}
                             disabled={isChatLoading}
                             style={{
                               padding: "0.4rem 0.8rem",

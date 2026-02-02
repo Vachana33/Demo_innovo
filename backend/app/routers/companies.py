@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -6,11 +6,16 @@ from app.database import get_db
 from app.models import FundingProgram, Company, Document, funding_program_companies, User
 from app.schemas import CompanyCreate, CompanyResponse
 from app.preprocessing import crawl_website, transcribe_audio
+from app.extraction import extract_company_profile
 from app.dependencies import get_current_user
+from app.file_storage import get_or_create_file, get_file_by_id, download_from_supabase_storage, compute_file_hash
+from app.audio_compression import compress_audio, validate_audio_size
+from app.models import File as FileModel
 from typing import List
+from datetime import datetime, timezone
 import logging
 import os
-import uuid
+
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -34,10 +39,19 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 @router.post("/upload-audio")
 async def upload_audio_file(
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
-    Upload an audio file and return the path where it's stored.
+    Upload an audio file with hash-based deduplication and automatic compression.
+    
+    Features:
+    - Validates file size (max 45MB before compression)
+    - Automatically compresses audio for speech-to-text (mono, 16kHz, low bitrate)
+    - Returns file_id instead of raw path
+    
+    Returns:
+        file_id, audio_path (same as file_id for backward compatibility), filename, is_new
     """
     try:
         # Validate file type
@@ -46,30 +60,104 @@ async def upload_audio_file(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="File must be an audio file"
             )
+
+        # Read file content
+        original_content = await file.read()
         
-        # Generate unique filename
-        file_extension = Path(file.filename).suffix if file.filename else '.mp3'
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = UPLOAD_DIR / unique_filename
+        # Validate file size before processing
+        is_valid, error_message = validate_audio_size(original_content)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=error_message
+            )
         
-        # Save file
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+        # Check if file already exists by hash (before compression)
+        # This allows reusing existing files without re-compressing
+        original_hash = compute_file_hash(original_content)
+        existing_file = db.query(FileModel).filter(FileModel.content_hash == original_hash).first()
         
-        # Store path relative to UPLOAD_DIR for portability (just filename)
-        # This makes paths stable across different UPLOAD_DIR configurations
-        stored_path = unique_filename
-        logger.info(f"Audio file uploaded: {file_path} (stored as: {stored_path})")
+        if existing_file:
+            logger.info(f"Audio file already exists (file_id={existing_file.id}, hash={original_hash}), reusing")
+            return {
+                "file_id": existing_file.id,
+                "audio_path": existing_file.id,
+                "filename": file.filename,
+                "is_new": False
+            }
         
-        return {"audio_path": stored_path, "filename": file.filename}
-    
+        # File doesn't exist, proceed with compression and upload
+        # Determine input format from filename or content type
+        input_format = "m4a"  # Default
+        if file.filename:
+            ext = Path(file.filename).suffix.lower().lstrip('.')
+            if ext in ["mp3", "wav", "m4a", "aac", "ogg", "flac"]:
+                input_format = ext
+        
+        # Compress audio for speech-to-text processing
+        # Compression reduces file size while maintaining speech quality
+        compressed_content = compress_audio(original_content, input_format=input_format)
+        
+        if not compressed_content:
+            logger.warning("Audio compression failed, using original file")
+            compressed_content = original_content
+        else:
+            # Validate compressed file size (should be smaller, but check anyway)
+            is_valid_compressed, error_msg = validate_audio_size(compressed_content)
+            if not is_valid_compressed:
+                logger.warning(f"Compressed file still too large: {error_msg}, using original")
+                compressed_content = original_content
+        
+        # Check if compressed version already exists
+        compressed_hash = compute_file_hash(compressed_content)
+        existing_compressed_file = db.query(FileModel).filter(FileModel.content_hash == compressed_hash).first()
+        
+        if existing_compressed_file:
+            logger.info(f"Compressed audio file already exists (file_id={existing_compressed_file.id}), reusing")
+            return {
+                "file_id": existing_compressed_file.id,
+                "audio_path": existing_compressed_file.id,
+                "filename": file.filename,
+                "is_new": False
+            }
+
+        # Get or create file record (hash-based deduplication)
+        # Use compressed content for storage to save space
+        file_record, is_new = get_or_create_file(
+            db=db,
+            file_bytes=compressed_content,
+            file_type="audio",
+            filename=file.filename
+        )
+
+        db.commit()
+
+        logger.info(
+            f"Audio file {'uploaded' if is_new else 'reused'} "
+            f"(file_id={file_record.id}, original_size={len(original_content)} bytes, "
+            f"stored_size={len(compressed_content)} bytes)"
+        )
+
+        # Return file_id as audio_path for backward compatibility with frontend
+        # Frontend expects audio_path, so we use file_id as the value
+        # Backend processing will detect if it's a file_id (UUID) or legacy path
+        return {
+            "file_id": file_record.id,
+            "audio_path": file_record.id,  # Return file_id as audio_path for backward compatibility
+            "filename": file.filename,
+            "is_new": is_new
+        }
+
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 413) as-is
+        raise
     except Exception as e:
-        logger.error(f"Error uploading audio file: {str(e)}")
+        db.rollback()
+        logger.error(f"Error uploading audio file: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload audio file: {str(e)}"
-        )
+        ) from e
 
 def process_company_background(company_id: int, website: str = None, audio_path: str = None):
     """
@@ -77,27 +165,28 @@ def process_company_background(company_id: int, website: str = None, audio_path:
     This runs asynchronously after the API response is returned.
     """
     from app.database import SessionLocal
-    
+
     db = SessionLocal()
     try:
         # Log preprocessing start
         logger.info(f"Starting preprocessing for company_id={company_id}")
-        
+
         company = db.query(Company).filter(Company.id == company_id).first()
         if not company:
             logger.error(f"Company not found for preprocessing: company_id={company_id}")
             return
-        
+
         # Update status to processing
         company.processing_status = "processing"
         company.processing_error = None
         db.commit()
-        
+
         # Process website
         if website:
             try:
                 logger.info(f"Extracting website data for company_id={company_id} (url={website})")
-                website_text = crawl_website(website)
+                # Phase 2: Pass db session for cache lookup/storage
+                website_text = crawl_website(website, db=db)
                 if website_text:
                     company.website_text = website_text
                     logger.info(f"Website data extraction completed for company_id={company_id} (extracted {len(website_text)} characters)")
@@ -107,26 +196,68 @@ def process_company_background(company_id: int, website: str = None, audio_path:
                 error_msg = f"Website crawl failed: {str(e)}"
                 logger.error(f"Website data extraction failed for company_id={company_id}: {error_msg}")
                 company.processing_error = error_msg
-        
+
         # Process audio
         if audio_path:
             try:
-                # Resolve audio path relative to UPLOAD_DIR
-                # Stored paths are filenames relative to UPLOAD_DIR for portability
-                if os.path.isabs(audio_path):
-                    # Legacy: absolute path (backward compatibility)
-                    resolved_audio_path = audio_path
+                # Check if audio_path is a file_id (UUID format) or legacy path
+                # UUID format: 36 characters with hyphens
+                is_file_id = len(audio_path) == 36 and audio_path.count('-') == 4
+
+                if is_file_id:
+                    # New: file_id approach - get file from database and download from Supabase
+                    logger.info(f"Processing audio via file_id for company_id={company_id} (file_id={audio_path})")
+                    file_record = get_file_by_id(db, audio_path)
+                    if not file_record:
+                        raise Exception(f"File not found: file_id={audio_path}")
+
+                    # Download file from Supabase Storage
+                    file_bytes = download_from_supabase_storage(file_record.storage_path)
+                    if not file_bytes:
+                        raise Exception(f"Failed to download file from Supabase Storage: {file_record.storage_path}")
+
+                    # Save to temporary file for transcription (OpenAI Whisper requires file path)
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.m4a') as tmp_file:
+                        tmp_file.write(file_bytes)
+                        tmp_audio_path = tmp_file.name
+
+                    try:
+                        logger.info(f"Transcribing audio for company_id={company_id} (file_id={audio_path})")
+                        # Phase 2: Pass file_content_hash and db session for cache lookup/storage
+                        transcript_text = transcribe_audio(
+                            tmp_audio_path,
+                            file_content_hash=file_record.content_hash,
+                            db=db
+                        )
+                        if transcript_text:
+                            company.transcript_text = transcript_text
+                            logger.info(f"Audio transcription completed for company_id={company_id} (transcript length: {len(transcript_text)} characters)")
+                        else:
+                            logger.warning(f"Audio transcription returned no text for company_id={company_id}")
+                    finally:
+                        # Clean up temporary file
+                        if os.path.exists(tmp_audio_path):
+                            os.unlink(tmp_audio_path)
                 else:
-                    # New: filename relative to UPLOAD_DIR
-                    resolved_audio_path = str(UPLOAD_DIR / audio_path)
-                
-                logger.info(f"Transcribing audio for company_id={company_id} (audio_path={resolved_audio_path})")
-                transcript_text = transcribe_audio(resolved_audio_path)
-                if transcript_text:
-                    company.transcript_text = transcript_text
-                    logger.info(f"Audio transcription completed for company_id={company_id} (transcript length: {len(transcript_text)} characters)")
-                else:
-                    logger.warning(f"Audio transcription returned no text for company_id={company_id}")
+                    # Legacy: filename path approach (backward compatibility)
+                    # Resolve audio path relative to UPLOAD_DIR
+                    if os.path.isabs(audio_path):
+                        # Legacy: absolute path (backward compatibility)
+                        resolved_audio_path = audio_path
+                    else:
+                        # Legacy: filename relative to UPLOAD_DIR
+                        resolved_audio_path = str(UPLOAD_DIR / audio_path)
+
+                    logger.info(f"Transcribing audio for company_id={company_id} (legacy audio_path={resolved_audio_path})")
+                    # Phase 2: For legacy paths, we don't have content_hash, so cache won't be used
+                    # Pass db session anyway in case we want to add hash computation for legacy files later
+                    transcript_text = transcribe_audio(resolved_audio_path, file_content_hash=None, db=db)
+                    if transcript_text:
+                        company.transcript_text = transcript_text
+                        logger.info(f"Audio transcription completed for company_id={company_id} (transcript length: {len(transcript_text)} characters)")
+                    else:
+                        logger.warning(f"Audio transcription returned no text for company_id={company_id}")
             except Exception as e:
                 error_msg = f"Audio transcription failed: {str(e)}"
                 logger.error(f"Audio transcription failed for company_id={company_id}: {error_msg}")
@@ -134,12 +265,55 @@ def process_company_background(company_id: int, website: str = None, audio_path:
                     company.processing_error += f"; {error_msg}"
                 else:
                     company.processing_error = error_msg
-        
-        # Update status to done
+
+        # Update status to done (website/audio processing complete)
         company.processing_status = "done"
         db.commit()
         logger.info(f"Finished preprocessing for company_id={company_id}")
-    
+
+        # Phase 2C: Extract structured company profile
+        # Only run extraction if we have text data and haven't extracted yet
+        has_text_data = (company.website_text and company.website_text.strip()) or (company.transcript_text and company.transcript_text.strip())
+        already_extracted = company.extraction_status == "extracted"
+
+        if has_text_data and not already_extracted:
+            try:
+                logger.info(f"Starting structured profile extraction for company_id={company_id}")
+
+                # Update extraction status to processing
+                company.extraction_status = "pending"
+                db.commit()
+
+                # Extract structured profile from raw text
+                website_text = company.website_text or ""
+                transcript_text = company.transcript_text or ""
+
+                company_profile = extract_company_profile(website_text, transcript_text)
+
+                # Store extracted profile
+                company.company_profile = company_profile
+                company.extraction_status = "extracted"
+                company.extracted_at = datetime.now(timezone.utc)
+                db.commit()
+
+                logger.info(f"Structured profile extraction completed for company_id={company_id}")
+
+            except Exception as e:
+                # Extraction failed - mark as failed but don't fail the entire preprocessing
+                error_msg = f"Profile extraction failed: {str(e)}"
+                logger.error(f"Profile extraction failed for company_id={company_id}: {error_msg}")
+
+                try:
+                    company.extraction_status = "failed"
+                    # Don't set extracted_at if extraction failed
+                    db.commit()
+                except Exception as commit_error:
+                    logger.error(f"Failed to update extraction error status for company_id={company_id}: {str(commit_error)}")
+        elif already_extracted:
+            logger.info(f"Skipping extraction for company_id={company_id} - already extracted")
+        elif not has_text_data:
+            logger.info(f"Skipping extraction for company_id={company_id} - no text data available")
+
     except Exception as e:
         logger.error(f"Preprocessing failed for company_id={company_id}: {str(e)}")
         try:
@@ -163,14 +337,14 @@ def create_company_in_program(
     funding_program_id: int,
     company_data: CompanyCreate,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Create a new company and automatically link it to the given funding program.
     Background processing (website crawling and audio transcription) is triggered
     after the response is returned.
-    
+
     Note: For file uploads, use the /upload-audio endpoint first, then provide the audio_path.
     """
     # Verify funding program exists and belongs to current user
@@ -183,34 +357,35 @@ def create_company_in_program(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Funding program not found"
         )
-    
+
     if not company_data.name or not company_data.name.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Company name is required"
         )
-    
+
     # Create new company with initial processing status (owned by current user)
+    # Note: audio_path can now be either a file_id (UUID) or legacy path string
     new_company = Company(
         name=company_data.name.strip(),
         website=company_data.website.strip() if company_data.website else None,
-        audio_path=company_data.audio_path.strip() if company_data.audio_path else None,
+        audio_path=company_data.audio_path.strip() if company_data.audio_path else None,  # Can be file_id or legacy path
         processing_status="pending",
         user_email=current_user.email
     )
-    
+
     try:
         db.add(new_company)
         db.flush()  # Flush to get the company ID
-        
+
         # Refresh funding_program to ensure we have latest state
         db.refresh(funding_program)
-        
+
         # Link company to funding program
         # Check if link already exists to avoid UNIQUE constraint violation
         # Check both via relationship and direct query for safety
         company_already_linked = new_company in funding_program.companies
-        
+
         if not company_already_linked:
             # Double-check with direct query
             existing_link = db.execute(
@@ -219,13 +394,13 @@ def create_company_in_program(
                     funding_program_companies.c.company_id == new_company.id
                 )
             ).first()
-            
+
             if not existing_link:
                 funding_program.companies.append(new_company)
-        
+
         db.commit()
         db.refresh(new_company)
-        
+
         # Schedule background processing
         if new_company.website or new_company.audio_path:
             background_tasks.add_task(
@@ -235,7 +410,7 @@ def create_company_in_program(
                 audio_path=new_company.audio_path
             )
             logger.info(f"Company preprocessing task enqueued for company_id={new_company.id}")
-        
+
         return new_company
     except IntegrityError as e:
         db.rollback()
@@ -262,13 +437,13 @@ def create_company_in_program(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create company: {str(e)}"
-        )
+        ) from e
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create company: {str(e)}"
-        )
+        ) from e
 
 @router.get(
     "/funding-programs/{funding_program_id}/companies",
@@ -276,8 +451,8 @@ def create_company_in_program(
 )
 def get_companies_for_program(
     funding_program_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Get all companies linked to a specific funding program.
@@ -292,15 +467,15 @@ def get_companies_for_program(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Funding program not found"
         )
-    
+
     # Return companies linked to this funding program (filtered by user ownership)
     # Only return companies that belong to the current user
     return [c for c in funding_program.companies if c.user_email == current_user.email]
 
 @router.get("/companies", response_model=List[CompanyResponse])
 def get_all_companies(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Get all companies owned by the current user across all funding programs.
@@ -314,8 +489,8 @@ def get_all_companies(
 @router.get("/companies/{company_id}", response_model=CompanyResponse)
 def get_company(
     company_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Get a single company by ID.
@@ -339,8 +514,8 @@ def get_company(
 def import_company_to_program(
     funding_program_id: int,
     company_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Import an existing company into a funding program.
@@ -356,7 +531,7 @@ def import_company_to_program(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Funding program not found"
         )
-    
+
     # Verify company exists and belongs to current user
     company = db.query(Company).filter(
         Company.id == company_id,
@@ -367,12 +542,12 @@ def import_company_to_program(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Company not found"
         )
-    
+
     # Check if company is already linked to this funding program
     if company in funding_program.companies:
         # Company already linked, return it
         return company
-    
+
     try:
         # Link existing company to funding program
         funding_program.companies.append(company)
@@ -384,14 +559,14 @@ def import_company_to_program(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to import company: {str(e)}"
-        )
+        ) from e
 
 @router.put("/companies/{company_id}", response_model=CompanyResponse)
 def update_company(
     company_id: int,
     company_data: CompanyCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Update an existing company.
@@ -405,18 +580,18 @@ def update_company(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Company not found"
         )
-    
+
     if not company_data.name or not company_data.name.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Company name is required"
         )
-    
+
     # Update company
     company.name = company_data.name.strip()
     company.website = company_data.website.strip() if company_data.website else None
     company.audio_path = company_data.audio_path.strip() if company_data.audio_path else None
-    
+
     try:
         db.commit()
         db.refresh(company)
@@ -426,13 +601,13 @@ def update_company(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update company"
-        )
+        ) from e
 
 @router.delete("/companies/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_company(
     company_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Delete a company.
@@ -447,18 +622,18 @@ def delete_company(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Company not found"
         )
-    
+
     try:
         # Delete all related documents first
         db.query(Document).filter(Document.company_id == company_id).delete()
-        
+
         # Delete all join table entries (funding_program_companies)
         db.execute(
             delete(funding_program_companies).where(
                 funding_program_companies.c.company_id == company_id
             )
         )
-        
+
         # Delete the company itself
         db.delete(company)
         db.commit()
@@ -468,5 +643,5 @@ def delete_company(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete company"
-        )
+        ) from e
 

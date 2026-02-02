@@ -36,27 +36,27 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24
 def create_access_token(data: Dict[str, str]) -> str:
     """
     Create a JWT access token with user information.
-    
+
     Args:
         data: Dictionary containing user information (email, user_id, etc.)
-    
+
     Returns:
         Encoded JWT token string
-    
+
     Security: Token includes expiration time and is signed with secret key
     """
     # Create a copy to avoid mutating the original dict
     to_encode = data.copy()
-    
+
     # Set expiration time - tokens expire after ACCESS_TOKEN_EXPIRE_HOURS
     # This ensures tokens cannot be used indefinitely if compromised
     expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
     to_encode.update({"exp": expire})
-    
+
     # Encode token with secret key and algorithm
     # The secret key ensures only our server can create valid tokens
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    
+
     logger.info(f"Access token created for user: {data.get('email', 'unknown')}")
     return encoded_jwt
 
@@ -64,13 +64,13 @@ def create_access_token(data: Dict[str, str]) -> str:
 def verify_token(token: str) -> Optional[Dict[str, str]]:
     """
     Verify and decode a JWT token.
-    
+
     Args:
         token: JWT token string to verify
-    
+
     Returns:
         Decoded token payload if valid, None if invalid or expired
-    
+
     Security: Validates signature and expiration time
     """
     try:
@@ -98,25 +98,25 @@ def verify_token(token: str) -> Optional[Dict[str, str]]:
 def create_password_reset_token(email: str) -> str:
     """
     Create a time-limited token for password reset.
-    
+
     Args:
         email: User email address
-    
+
     Returns:
         Encoded JWT token for password reset
-    
+
     Security: Reset tokens expire after 1 hour for security
     """
     # Reset tokens have shorter expiration (1 hour) for security
     # This limits the window of opportunity if token is compromised
     expire = datetime.utcnow() + timedelta(hours=1)
-    
+
     to_encode = {
         "email": email,
         "type": "password_reset",  # Token type to distinguish from access tokens
         "exp": expire
     }
-    
+
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     logger.info(f"Password reset token created for: {email}")
     return encoded_jwt
@@ -125,26 +125,26 @@ def create_password_reset_token(email: str) -> str:
 def verify_password_reset_token(token: str) -> Optional[str]:
     """
     Verify a password reset token and return the email.
-    
+
     Args:
         token: Password reset token
-    
+
     Returns:
         User email if token is valid, None otherwise
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        
+
         # Verify this is a password reset token (not an access token)
         if payload.get("type") != "password_reset":
             logger.warning("Token provided is not a password reset token")
             return None
-        
+
         email = payload.get("email")
         if not email:
             logger.warning("Password reset token missing email")
             return None
-        
+
         return email
     except ExpiredSignatureError:
         logger.warning("Password reset token has expired")

@@ -62,7 +62,7 @@ export default function LoginPage() {
 
     try {
       const endpoint = mode === "login" ? "/auth/login" : "/auth/register";
-      const data = await apiPost<any>(endpoint, {
+      const data = await apiPost<{ success?: boolean; access_token?: string; token?: string; message?: string }>(endpoint, {
         email: email.toLowerCase(),
         password: password,
       });
@@ -94,9 +94,9 @@ export default function LoginPage() {
         setError(data.message || "An error occurred. Please try again.");
         setIsLoading(false);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Network error or API error (apiPost throws on non-ok responses)
-      const errorMessage = err?.message || "Network error. Please check if the backend server is running.";
+      const errorMessage = err instanceof Error ? err.message : "Network error. Please check if the backend server is running.";
       setError(errorMessage);
       setIsLoading(false);
     }

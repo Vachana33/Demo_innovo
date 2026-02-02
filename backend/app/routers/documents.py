@@ -1,13 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Response
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Query
 from sqlalchemy.orm import Session, defer, make_transient
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.exc import ProgrammingError
 from app.database import get_db
-from app.models import Document, Company, User
-from app.schemas import DocumentResponse, DocumentUpdate, DocumentContent, DocumentSection, ChatRequest, ChatResponse, ChatConfirmationRequest
+from app.models import Document, Company, User, FundingProgram
+from app.schemas import DocumentResponse, DocumentUpdate, ChatRequest, ChatResponse, ChatConfirmationRequest
 from app.dependencies import get_current_user
-from typing import List, Optional, Tuple
+from app.template_resolver import get_template_for_funding_program
+from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timezone
 import os
 import json
@@ -16,7 +16,6 @@ import logging
 import io
 import traceback
 from openai import OpenAI
-import openai
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,7 @@ def _safe_get_document_by_id(document_id: int, db: Session) -> Optional[Document
     Safely query Document by ID, handling missing chat_history column gracefully.
     Returns Document object or None if not found.
     """
-    
+
     try:
         # First try normal query
         document = db.query(Document).filter(Document.id == document_id).first()
@@ -59,10 +58,10 @@ def _safe_get_document_by_id(document_id: int, db: Session) -> Optional[Document
                 document.chat_history = []
         return document
     except ProgrammingError as e:
-        
+
         # CRITICAL: Rollback transaction immediately
         db.rollback()
-        
+
         # Check if error is about chat_history column not existing
         error_str = str(e.orig) if hasattr(e, 'orig') else str(e)
         if 'chat_history' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
@@ -76,20 +75,21 @@ def _safe_get_document_by_id(document_id: int, db: Session) -> Optional[Document
                     # Set chat_history to empty list in memory
                     try:
                         document.chat_history = []
-                    except:
+                    except Exception:  # noqa: B110
+                        # Silently ignore if chat_history column doesn't exist (legacy compatibility)
                         pass
                 return document
-            except Exception as defer_error:
+            except Exception:
                 # If defer also fails, rollback and use raw SQL as last resort
                 db.rollback()
-                logger.warning(f"Defer approach also failed: {str(defer_error)}. Using raw SQL workaround.")
+                logger.warning("Defer approach also failed. Using raw SQL workaround.")
                 from sqlalchemy import text
                 try:
                     result = db.execute(
                         text("""
-                            SELECT id, company_id, type, content_json, updated_at 
-                            FROM documents 
-                            WHERE id = :doc_id 
+                            SELECT id, company_id, type, content_json, updated_at
+                            FROM documents
+                            WHERE id = :doc_id
                             LIMIT 1
                         """),
                         {"doc_id": document_id}
@@ -100,7 +100,7 @@ def _safe_get_document_by_id(document_id: int, db: Session) -> Optional[Document
                         content_json = row[3]
                         if isinstance(content_json, str):
                             content_json = json.loads(content_json)
-                        
+
                         # Create Document object from raw SQL result
                         document = Document(
                             id=row[0],
@@ -130,11 +130,14 @@ def _safe_get_document_by_id(document_id: int, db: Session) -> Optional[Document
 )
 def get_document(
     company_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    funding_program_id: Optional[int] = Query(None, description="Funding program ID for template resolution"),
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
-    Get a document for a company by type.
+    Get or create a document for a company by type.
+    Uses funding_program_id to resolve template and create document if needed.
+    Supports legacy documents (funding_program_id=NULL) for backward compatibility.
     Currently only supports "vorhabensbeschreibung".
     """
     # Verify company exists and belongs to current user
@@ -147,157 +150,257 @@ def get_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Company not found"
         )
-    
+
     # Get or create document
     # Handle case where chat_history column doesn't exist in database
     document = None
     chat_history_missing = False  # Track if we know chat_history column doesn't exist
-    
-    try:
-        # First try normal query
-        document = db.query(Document).filter(
-            Document.company_id == company_id,
-            Document.type == "vorhabensbeschreibung"
+
+    # Case 1: funding_program_id provided - use template system
+    if funding_program_id:
+        # Verify funding program exists and belongs to current user
+        funding_program = db.query(FundingProgram).filter(
+            FundingProgram.id == funding_program_id,
+            FundingProgram.user_email == current_user.email
         ).first()
-    except ProgrammingError as e:
-        # CRITICAL: Rollback transaction immediately - it's in failed state after the error
-        db.rollback()
-        
-        # Check if error is about chat_history column not existing
-        error_str = str(e.orig) if hasattr(e, 'orig') else str(e)
-        if 'chat_history' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
-            chat_history_missing = True
-            logger.warning(f"chat_history column does not exist in database. Using workaround for company {company_id}")
-            # Try using defer to exclude chat_history from query
+        if not funding_program:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Funding program not found"
+            )
+
+        try:
+            # Try to find document with funding_program_id
+            document = db.query(Document).filter(
+                Document.company_id == company_id,
+                Document.funding_program_id == funding_program_id,
+                Document.type == "vorhabensbeschreibung"
+            ).first()
+        except ProgrammingError as e:
+            # Handle case where funding_program_id column doesn't exist yet
+            db.rollback()
+            error_str = str(e.orig) if hasattr(e, 'orig') else str(e)
+            if 'funding_program_id' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
+                logger.warning(f"funding_program_id column does not exist. Falling back to legacy document lookup for company {company_id}")
+                # Fall through to legacy document handling below
+                document = None
+            else:
+                raise
+
+        # If not found, check for legacy document (funding_program_id=NULL)
+        if not document:
             try:
-                document = db.query(Document).options(defer(Document.chat_history)).filter(
+                legacy_doc = db.query(Document).filter(
                     Document.company_id == company_id,
+                    Document.funding_program_id.is_(None),
                     Document.type == "vorhabensbeschreibung"
                 ).first()
-                if document:
-                    # Set chat_history to empty list in memory (column doesn't exist in DB)
+
+                # One-time upgrade: attach legacy document to funding program
+                if legacy_doc:
                     try:
-                        document.chat_history = []
-                    except:
-                        pass
-            except Exception as defer_error:
-                # If defer also fails, rollback and use raw SQL as last resort
-                db.rollback()
-                logger.warning(f"Defer approach also failed: {str(defer_error)}. Using raw SQL workaround.")
-                from sqlalchemy import text
-                try:
-                    result = db.execute(
-                        text("""
-                            SELECT id, company_id, type, content_json, updated_at 
-                            FROM documents 
-                            WHERE company_id = :company_id AND type = :doc_type 
-                            LIMIT 1
-                        """),
-                        {"company_id": company_id, "doc_type": "vorhabensbeschreibung"}
-                    )
-                    row = result.first()
-                    if row:
-                        # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
-                        content_json = row[3]
-                        if isinstance(content_json, str):
-                            content_json = json.loads(content_json)
-                        
-                        # Create Document object from raw SQL result
-                        # Use make_transient to prevent SQLAlchemy from tracking it
-                        document = Document(
-                            id=row[0],
-                            company_id=row[1],
-                            type=row[2],
-                            content_json=content_json,
-                            updated_at=row[4]
-                        )
-                        # Make it transient so SQLAlchemy doesn't try to track it
-                        # This prevents SQLAlchemy from trying to access chat_history when serializing
-                        make_transient(document)
-                        # Set chat_history in memory (not persisted, column doesn't exist)
-                        document.chat_history = []
-                except Exception as sql_error:
-                    db.rollback()
-                    logger.error(f"Raw SQL workaround also failed: {str(sql_error)}")
-                    document = None
-        else:
-            # Re-raise if it's a different ProgrammingError
-            logger.error(f"Unexpected ProgrammingError: {str(e)}", exc_info=True)
-            raise
-    
-    if not document:
-        # Create empty document if it doesn't exist
-        # If we know chat_history is missing, skip ORM and use raw SQL directly
-        if chat_history_missing:
-            logger.warning(f"chat_history column does not exist. Creating document using raw SQL for company {company_id}")
-            from sqlalchemy import text
+                        legacy_doc.funding_program_id = funding_program_id
+
+                        # Check if document needs template structure (empty or old structure)
+                        existing_sections = legacy_doc.content_json.get("sections", [])
+                        needs_template = len(existing_sections) == 0 or len(existing_sections) < 20
+
+                        if needs_template:
+                            # Populate with template structure (Phase 2.5: use template resolver)
+                            try:
+                                template = get_template_for_funding_program(funding_program, db)
+                                sections = template.get("sections", [])
+
+                                # Initialize milestone table for section 4.1 if present
+                                for section in sections:
+                                    if section.get("id") == "4.1" and section.get("type") == "milestone_table":
+                                        # Content is already JSON string from template
+                                        pass
+                                    elif "content" not in section:
+                                        section["content"] = ""
+
+                                # Preserve existing content if sections match by ID
+                                if existing_sections:
+                                    existing_by_id = {s.get("id"): s for s in existing_sections}
+                                    for section in sections:
+                                        section_id = section.get("id")
+                                        if section_id in existing_by_id:
+                                            # Preserve existing content
+                                            section["content"] = existing_by_id[section_id].get("content", "")
+
+                                legacy_doc.content_json = {"sections": sections}
+                                template_ref = funding_program.template_ref or funding_program.template_name or "unknown"
+                                logger.info(f"[TEMPLATE RESOLVER] Populated legacy document {legacy_doc.id} with template '{template_ref}' structure")
+                            except Exception as template_error:
+                                logger.warning(f"Failed to populate template structure for legacy document {legacy_doc.id}: {str(template_error)}")
+                                # Continue with upgrade even if template population fails
+
+                        db.commit()
+                        db.refresh(legacy_doc)
+                        document = legacy_doc
+                        logger.info(f"Upgraded legacy document {legacy_doc.id} to funding_program_id={funding_program_id}")
+                    except Exception as e:
+                        db.rollback()
+                        logger.error(f"Failed to upgrade legacy document: {str(e)}")
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Failed to upgrade legacy document: {str(e)}"
+                        ) from None
+            except ProgrammingError:
+                # Column doesn't exist, skip legacy upgrade
+                pass
+
+        # If still no document, create from template
+        if not document:
+            # Phase 2.5: Resolve template using template resolver (handles both system and user templates)
             try:
-                result = db.execute(
-                    text("""
-                        INSERT INTO documents (company_id, type, content_json, updated_at)
-                        VALUES (:company_id, :doc_type, :content_json, NOW())
-                        RETURNING id, company_id, type, content_json, updated_at
-                    """),
-                    {
-                        "company_id": company_id,
-                        "doc_type": "vorhabensbeschreibung",
-                        "content_json": json.dumps({"sections": []})
-                    }
-                )
-                row = result.first()
-                if row:
-                    # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
-                    content_json = row[3]
-                    if isinstance(content_json, str):
-                        content_json = json.loads(content_json)
-                    
-                    # Create Document object from inserted row
-                    document = Document(
-                        id=row[0],
-                        company_id=row[1],
-                        type=row[2],
-                        content_json=content_json,
-                        updated_at=row[4]
-                    )
-                    # Make it transient to avoid SQLAlchemy tracking issues
-                    make_transient(document)
-                    # Set chat_history in memory only
-                    document.chat_history = []
-                    # Commit the raw SQL insert
-                    db.commit()
-                else:
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Failed to create document: no row returned"
-                    )
-            except Exception as sql_error:
-                db.rollback()
-                logger.error(f"Failed to create document using raw SQL: {str(sql_error)}", exc_info=True)
+                template = get_template_for_funding_program(funding_program, db)
+            except ValueError as e:
+                logger.error(f"[TEMPLATE RESOLVER] Failed to resolve template for funding program {funding_program_id}: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Template resolution failed: {str(e)}"
+                ) from None
+            except Exception as e:
+                logger.error(f"[TEMPLATE RESOLVER] Unexpected error resolving template: {str(e)}", exc_info=True)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to create document: {str(sql_error)}"
-                )
-        else:
-            # Normal ORM creation path (chat_history column exists)
+                    detail=f"Template resolution error: {str(e)}"
+                ) from e
+
+            # Convert template to document sections format
+            sections = template.get("sections", [])
+
+            # Initialize milestone table for section 4.1 if present
+            for section in sections:
+                if section.get("id") == "4.1" and section.get("type") == "milestone_table":
+                    # Content is already JSON string from template
+                    pass
+                elif "content" not in section:
+                    section["content"] = ""
+
+            # Create document from template
             try:
                 document = Document(
                     company_id=company_id,
+                    funding_program_id=funding_program_id,
                     type="vorhabensbeschreibung",
-                    content_json={"sections": []}
-                    # chat_history is not set here - will be initialized after creation if column exists
+                    content_json={"sections": sections}
                 )
                 db.add(document)
                 db.commit()
                 db.refresh(document)
-            except ProgrammingError as create_error:
-                # Check if error is about chat_history column not existing
-                error_str = str(create_error.orig) if hasattr(create_error, 'orig') else str(create_error)
-                if 'chat_history' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
-                    logger.warning(f"chat_history column does not exist. Creating document using raw SQL for company {company_id}")
+                template_ref = funding_program.template_ref or funding_program.template_name or "unknown"
+                logger.info(f"[TEMPLATE RESOLVER] Created document {document.id} from template '{template_ref}' (source={funding_program.template_source or 'legacy'}) for company {company_id}")
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to create document from template: {str(e)}", exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to create document: {str(e)}"
+                ) from e
+
+    # Case 2: No funding_program_id provided - return legacy document
+    else:
+        try:
+            # Return legacy document (funding_program_id=NULL) if exists
+            document = db.query(Document).filter(
+                Document.company_id == company_id,
+                Document.funding_program_id.is_(None),
+                Document.type == "vorhabensbeschreibung"
+            ).first()
+        except ProgrammingError as e:
+            # CRITICAL: Rollback transaction immediately - it's in failed state after the error
+            db.rollback()
+
+            # Check if error is about chat_history or funding_program_id column not existing
+            error_str = str(e.orig) if hasattr(e, 'orig') else str(e)
+            if 'chat_history' in error_str.lower() or 'funding_program_id' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
+                chat_history_missing = True
+                logger.warning(f"Column does not exist in database. Using workaround for company {company_id}")
+                # Try using defer to exclude problematic columns from query
+                try:
+                    document = db.query(Document).options(defer(Document.chat_history)).filter(
+                        Document.company_id == company_id,
+                        Document.funding_program_id.is_(None),
+                        Document.type == "vorhabensbeschreibung"
+                    ).first()
+                    if document:
+                        # Set chat_history to empty list in memory (column doesn't exist in DB)
+                        try:
+                            document.chat_history = []
+                        except Exception:  # noqa: B110
+                            # Silently ignore if chat_history column doesn't exist (legacy compatibility)
+                            pass
+                except Exception as defer_error:
+                    # If defer also fails, rollback and use raw SQL as last resort
                     db.rollback()
-                    # Use raw SQL to insert without chat_history column
+                    logger.warning(f"Defer approach also failed: {str(defer_error)}. Using raw SQL workaround.")
                     from sqlalchemy import text
                     try:
+                        result = db.execute(
+                            text("""
+                                SELECT id, company_id, type, content_json, updated_at
+                                FROM documents
+                                WHERE company_id = :company_id AND type = :doc_type
+                                LIMIT 1
+                            """),
+                            {"company_id": company_id, "doc_type": "vorhabensbeschreibung"}
+                        )
+                        row = result.first()
+                        if row:
+                            # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
+                            content_json = row[3]
+                            if isinstance(content_json, str):
+                                content_json = json.loads(content_json)
+
+                            # Create Document object from raw SQL result
+                            # Use make_transient to prevent SQLAlchemy from tracking it
+                            document = Document(
+                                id=row[0],
+                                company_id=row[1],
+                                type=row[2],
+                                content_json=content_json,
+                                updated_at=row[4]
+                            )
+                            # Make it transient so SQLAlchemy doesn't try to track it
+                            # This prevents SQLAlchemy from trying to access chat_history when serializing
+                            make_transient(document)
+                            # Set chat_history in memory (not persisted, column doesn't exist)
+                            document.chat_history = []
+                    except Exception as sql_error:
+                        db.rollback()
+                        logger.error(f"Raw SQL workaround also failed: {str(sql_error)}")
+                        document = None
+            else:
+                # Re-raise if it's a different ProgrammingError
+                logger.error(f"Unexpected ProgrammingError: {str(e)}", exc_info=True)
+                raise
+
+        # Create empty legacy document if it doesn't exist
+        if not document:
+            # If we know chat_history is missing, skip ORM and use raw SQL directly
+            if chat_history_missing:
+                logger.warning(f"chat_history column does not exist. Creating document using raw SQL for company {company_id}")
+                from sqlalchemy import text
+                try:
+                    # Check if funding_program_id column exists
+                    try:
+                        result = db.execute(
+                            text("""
+                                INSERT INTO documents (company_id, funding_program_id, type, content_json, updated_at)
+                                VALUES (:company_id, :funding_program_id, :doc_type, :content_json, NOW())
+                                RETURNING id, company_id, type, content_json, updated_at
+                            """),
+                            {
+                                "company_id": company_id,
+                                "funding_program_id": None,  # Legacy document
+                                "doc_type": "vorhabensbeschreibung",
+                                "content_json": json.dumps({"sections": []})
+                            }
+                        )
+                    except Exception:
+                        # funding_program_id column doesn't exist, use old schema
                         result = db.execute(
                             text("""
                                 INSERT INTO documents (company_id, type, content_json, updated_at)
@@ -310,52 +413,137 @@ def get_document(
                                 "content_json": json.dumps({"sections": []})
                             }
                         )
-                        row = result.first()
-                        if row:
-                            # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
-                            content_json = row[3]
-                            if isinstance(content_json, str):
-                                content_json = json.loads(content_json)
-                            
-                            # Create Document object from inserted row
-                            document = Document(
-                                id=row[0],
-                                company_id=row[1],
-                                type=row[2],
-                                content_json=content_json,
-                                updated_at=row[4]
-                            )
-                            # Make it transient to avoid SQLAlchemy tracking issues
-                            make_transient(document)
-                            # Set chat_history in memory only
-                            document.chat_history = []
-                            # Commit the raw SQL insert
-                            db.commit()
-                        else:
-                            raise HTTPException(
-                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                detail="Failed to create document: no row returned"
-                            )
-                    except Exception as sql_error:
-                        db.rollback()
-                        logger.error(f"Failed to create document using raw SQL: {str(sql_error)}", exc_info=True)
+                    row = result.first()
+                    if row:
+                        # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
+                        content_json = row[3]
+                        if isinstance(content_json, str):
+                            content_json = json.loads(content_json)
+
+                        # Create Document object from inserted row
+                        document = Document(
+                            id=row[0],
+                            company_id=row[1],
+                            type=row[2],
+                            content_json=content_json,
+                            updated_at=row[4]
+                        )
+                        # Make it transient to avoid SQLAlchemy tracking issues
+                        make_transient(document)
+                        # Set chat_history in memory only
+                        document.chat_history = []
+                        # Commit the raw SQL insert
+                        db.commit()
+                    else:
                         raise HTTPException(
                             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"Failed to create document: {str(sql_error)}"
+                            detail="Failed to create document: no row returned"
                         )
-                else:
-                    # Re-raise if it's a different ProgrammingError
+                except Exception as sql_error:
                     db.rollback()
-                    logger.error(f"Unexpected ProgrammingError during document creation: {str(create_error)}", exc_info=True)
-                    raise
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Failed to create document for company {company_id}: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to create document: {str(e)}"
-                )
-    
+                    logger.error(f"Failed to create document using raw SQL: {str(sql_error)}", exc_info=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to create document: {str(sql_error)}"
+                    ) from None
+            else:
+                # Normal ORM creation path (chat_history column exists)
+                try:
+                    document = Document(
+                        company_id=company_id,
+                        funding_program_id=None,  # Legacy document
+                        type="vorhabensbeschreibung",
+                        content_json={"sections": []}
+                        # chat_history is not set here - will be initialized after creation if column exists
+                    )
+                    db.add(document)
+                    db.commit()
+                    db.refresh(document)
+                    logger.info(f"Created legacy document {document.id} for company {company_id}")
+                except ProgrammingError as create_error:
+                    # Check if error is about chat_history column not existing
+                    error_str = str(create_error.orig) if hasattr(create_error, 'orig') else str(create_error)
+                    if 'chat_history' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
+                        logger.warning(f"chat_history column does not exist. Creating document using raw SQL for company {company_id}")
+                        db.rollback()
+                        # Use raw SQL to insert without chat_history column
+                        from sqlalchemy import text
+                        try:
+                            # Check if funding_program_id column exists
+                            try:
+                                result = db.execute(
+                                    text("""
+                                        INSERT INTO documents (company_id, funding_program_id, type, content_json, updated_at)
+                                        VALUES (:company_id, :funding_program_id, :doc_type, :content_json, NOW())
+                                        RETURNING id, company_id, type, content_json, updated_at
+                                    """),
+                                    {
+                                        "company_id": company_id,
+                                        "funding_program_id": None,  # Legacy document
+                                        "doc_type": "vorhabensbeschreibung",
+                                        "content_json": json.dumps({"sections": []})
+                                    }
+                                )
+                            except Exception:
+                                # funding_program_id column doesn't exist, use old schema
+                                result = db.execute(
+                                    text("""
+                                        INSERT INTO documents (company_id, type, content_json, updated_at)
+                                        VALUES (:company_id, :doc_type, :content_json, NOW())
+                                        RETURNING id, company_id, type, content_json, updated_at
+                                    """),
+                                    {
+                                        "company_id": company_id,
+                                        "doc_type": "vorhabensbeschreibung",
+                                        "content_json": json.dumps({"sections": []})
+                                    }
+                                )
+                            row = result.first()
+                            if row:
+                                # Parse content_json if it's a string (PostgreSQL might return it as string or dict)
+                                content_json = row[3]
+                                if isinstance(content_json, str):
+                                    content_json = json.loads(content_json)
+
+                                # Create Document object from inserted row
+                                document = Document(
+                                    id=row[0],
+                                    company_id=row[1],
+                                    type=row[2],
+                                    content_json=content_json,
+                                    updated_at=row[4]
+                                )
+                                # Make it transient to avoid SQLAlchemy tracking issues
+                                make_transient(document)
+                                # Set chat_history in memory only
+                                document.chat_history = []
+                                # Commit the raw SQL insert
+                                db.commit()
+                            else:
+                                raise HTTPException(
+                                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    detail="Failed to create document: no row returned"
+                                )
+                        except Exception as sql_error:
+                            db.rollback()
+                            logger.error(f"Failed to create document using raw SQL: {str(sql_error)}", exc_info=True)
+                            raise HTTPException(
+                                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"Failed to create document: {str(sql_error)}"
+                            ) from None
+                    else:
+                        # Re-raise if it's a different ProgrammingError
+                        db.rollback()
+                        logger.error(f"Unexpected ProgrammingError during document creation: {str(create_error)}", exc_info=True)
+                        raise
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"Failed to create document for company {company_id}: {str(e)}", exc_info=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to create document: {str(e)}"
+                    ) from e
+
     # Ensure chat_history is initialized if null
     # Handle case where column might not exist yet (migration not run)
     try:
@@ -381,9 +569,11 @@ def get_document(
         logger.warning(f"Error initializing chat_history for document {document.id}: {str(e)}")
         try:
             document.chat_history = []
-        except:
-            pass  # If we can't even set it in memory, continue without it
-    
+        except Exception:  # noqa: B110
+            # Silently ignore if chat_history column doesn't exist (legacy compatibility)
+            # If we can't even set it in memory, continue without it
+            pass
+
     return document
 
 @router.put(
@@ -393,20 +583,21 @@ def get_document(
 def update_document(
     document_id: int,
     document_data: DocumentUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Update a document's content.
+    Phase 2.6: Validates that section titles cannot be changed after headings_confirmed=True
     """
-    
+
     document = _safe_get_document_by_id(document_id, db)
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
     # Verify company belongs to current user
     company = db.query(Company).filter(
         Company.id == document.company_id,
@@ -417,10 +608,42 @@ def update_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
+    # Phase 2.6: Validate section structure changes if headings are confirmed
+    if hasattr(document, 'headings_confirmed') and document.headings_confirmed:
+        old_sections = document.content_json.get("sections", [])
+        new_sections = document_data.content_json.get("sections", [])
+
+        # Create maps for quick lookup
+        old_by_id = {s.get("id"): s for s in old_sections if isinstance(s, dict) and "id" in s}
+        new_by_id = {s.get("id"): s for s in new_sections if isinstance(s, dict) and "id" in s}
+
+        # Check for any title changes
+        for section_id, new_section in new_by_id.items():
+            if section_id in old_by_id:
+                old_title = old_by_id[section_id].get("title", "")
+                new_title = new_section.get("title", "")
+                if old_title != new_title:
+                    logger.warning(f"Attempted to rename section '{section_id}' from '{old_title}' to '{new_title}' after headings confirmation")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Headings are locked after confirmation. Section titles cannot be changed."
+                    )
+
+        # Check for new sections (section insertion)
+        old_ids = set(old_by_id.keys())
+        new_ids = set(new_by_id.keys())
+        added_ids = new_ids - old_ids
+        if added_ids:
+            logger.warning(f"Attempted to add new sections {added_ids} after headings confirmation")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Headings are locked after confirmation. New sections cannot be added."
+            )
+
     # Update content
     document.content_json = document_data.content_json
-    
+
     try:
         db.commit()
         db.refresh(document)
@@ -430,7 +653,60 @@ def update_document(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update document: {str(e)}"
+        ) from e
+
+
+@router.post("/documents/{document_id}/confirm-headings", response_model=DocumentResponse)
+def confirm_headings(
+    document_id: int,
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    Phase 2.6: Mark document headings as confirmed.
+    This locks section titles from further changes.
+    """
+    document = _safe_get_document_by_id(document_id, db)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
         )
+
+    # Verify company belongs to current user
+    company = db.query(Company).filter(
+        Company.id == document.company_id,
+        Company.user_email == current_user.email
+    ).first()
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+
+    # Set headings_confirmed to True
+    if hasattr(document, 'headings_confirmed'):
+        document.headings_confirmed = True
+    else:
+        # Fallback for databases that haven't run migration yet
+        logger.warning(f"headings_confirmed column not found for document {document_id}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Headings confirmation not available. Please run database migration."
+        )
+
+    try:
+        db.commit()
+        db.refresh(document)
+        logger.info(f"Headings confirmed for document {document_id}")
+        return document
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to confirm headings for document {document_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to confirm headings: {str(e)}"
+        ) from e
 
 
 # PDF style reference cache (extracted once, reused many times)
@@ -442,16 +718,16 @@ def _extract_pdf_style_reference(pdf_path: str) -> str:
     Extract text from a PDF file to use as style reference.
     Returns a cleaned text sample (first 2000-3000 chars) that represents style, tone, and structure.
     If extraction fails, returns empty string (silent fallback).
-    
+
     CRITICAL: This function must not raise exceptions - it must gracefully handle all errors.
     """
     try:
         import PyPDF2
-        
+
         if not os.path.exists(pdf_path):
             logger.warning(f"PDF file not found: {pdf_path}")
             return ""
-        
+
         text_content = []
         with open(pdf_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
@@ -462,19 +738,19 @@ def _extract_pdf_style_reference(pdf_path: str) -> str:
                 text = page.extract_text()
                 if text:
                     text_content.append(text)
-            
+
             # Combine and clean text
             combined_text = "\n\n".join(text_content)
-            
+
             # Take first 2500 characters as style sample
             style_sample = combined_text[:2500].strip()
-            
+
             # Clean up excessive whitespace
             style_sample = re.sub(r'\s+', ' ', style_sample)
             style_sample = re.sub(r'\n\s*\n', '\n\n', style_sample)
-            
+
             return style_sample
-            
+
     except ImportError:
         logger.warning("PyPDF2 library not installed. PDF style references will not be available.")
         return ""
@@ -489,29 +765,29 @@ def _build_style_reference_text() -> str:
     Caches the result to avoid re-extracting on every call.
     Returns formatted text that can be inserted into prompts.
     If extraction fails, returns empty string (silent fallback).
-    
+
     CRITICAL: This function must not raise exceptions - it must gracefully handle all errors.
     """
     global _pdf_style_reference_cache
-    
+
     # Return cached result if available
     if _pdf_style_reference_cache is not None:
         return _pdf_style_reference_cache
-    
+
     try:
         # Get the base directory (backend/app)
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         pdf_dir = os.path.join(base_dir, "app", "ai", "prompts", "vorhabensbeschreibung")
-        
+
         dlico_path = os.path.join(pdf_dir, "DIlico.pdf")
         lagotec_path = os.path.join(pdf_dir, "Lagotec.pdf")
-        
+
         dlico_text = _extract_pdf_style_reference(dlico_path)
         lagotec_text = _extract_pdf_style_reference(lagotec_path)
-        
+
         # Build style reference section
         style_parts = []
-        
+
         if dlico_text or lagotec_text:
             style_parts.append("WICHTIG - STILREFERENZEN:")
             style_parts.append("Sie haben Zugriff auf zwei Beispiel-Vorhabensbeschreibungen als PDF-Dateien (DIlico.pdf und Lagotec.pdf).")
@@ -529,32 +805,115 @@ def _build_style_reference_text() -> str:
             style_parts.append("- Erwähnen Sie diese PDFs NICHT im generierten Text")
             style_parts.append("- Alle faktischen Inhalte müssen AUSSCHLIESSLICH aus den bereitgestellten Firmeninformationen stammen")
             style_parts.append("")
-            
+
             if dlico_text:
                 style_parts.append("STILBEISPIEL aus DIlico.pdf (NUR als Stilreferenz):")
                 style_parts.append(dlico_text)
                 style_parts.append("")
-            
+
             if lagotec_text:
                 style_parts.append("STILBEISPIEL aus Lagotec.pdf (NUR als Stilreferenz):")
                 style_parts.append(lagotec_text)
                 style_parts.append("")
-            
+
             style_parts.append("Passen Sie Absatzlänge, narrative Dichte und professionellen Ton an den Stil der Beispiel-PDFs an.")
             style_parts.append("")
-        
+
         result = "\n".join(style_parts)
-        
+
         # Cache the result (even if empty)
         _pdf_style_reference_cache = result
-        
+
         return result
-        
+
     except Exception as e:
         logger.warning(f"Failed to build style reference text: {str(e)}")
         # Cache empty string to avoid repeated failures
         _pdf_style_reference_cache = ""
         return ""
+
+
+def _format_company_context_for_prompt(
+    company_profile: Optional[Dict[str, Any]],
+    company_name: str,
+    website_text: str,
+    transcript_text: str,
+    company_id: Optional[int] = None
+) -> str:
+    """
+    Format company context for LLM prompts.
+
+    Phase 2D: Uses structured company_profile as PRIMARY source,
+    falls back to raw text only if profile is missing.
+
+    Args:
+        company_profile: Structured company profile dict (from extraction)
+        company_name: Company name
+        website_text: Raw website text (fallback)
+        transcript_text: Raw transcript text (fallback)
+        company_id: Company ID for logging (optional)
+
+    Returns:
+        Formatted company context string for prompt
+    """
+    if company_profile:
+        # Guardrail A: Log successful use of structured profile
+        if company_id:
+            logger.info(f"Using structured company_profile for company_id={company_id}")
+        # Use structured profile as PRIMARY source
+        profile_parts = [f"- Firmenname: {company_name}"]
+
+        if company_profile.get("industry"):
+            profile_parts.append(f"- Branche: {company_profile['industry']}")
+
+        if company_profile.get("products_or_services"):
+            products = company_profile["products_or_services"]
+            if isinstance(products, list) and products:
+                products_str = ", ".join(products)
+                profile_parts.append(f"- Produkte/Dienstleistungen: {products_str}")
+            elif isinstance(products, str):
+                profile_parts.append(f"- Produkte/Dienstleistungen: {products}")
+
+        if company_profile.get("business_model"):
+            profile_parts.append(f"- Geschäftsmodell: {company_profile['business_model']}")
+
+        if company_profile.get("market"):
+            profile_parts.append(f"- Zielmarkt: {company_profile['market']}")
+
+        if company_profile.get("innovation_focus"):
+            profile_parts.append(f"- Innovationsschwerpunkt: {company_profile['innovation_focus']}")
+
+        if company_profile.get("company_size"):
+            profile_parts.append(f"- Unternehmensgröße: {company_profile['company_size']}")
+
+        if company_profile.get("location"):
+            profile_parts.append(f"- Standort: {company_profile['location']}")
+
+        return "\n".join(profile_parts)
+    else:
+        # Guardrail A: Log fallback to raw text
+        if company_id:
+            logger.warning(
+                f"FALLBACK to raw text for company_id={company_id} "
+                f"(company_profile missing)"
+            )
+
+        # Fallback to raw text if profile not available
+        # Smart truncation for company data
+        MAX_TEXT_LENGTH = 50000
+
+        def smart_truncate(text: str, max_length: int) -> str:
+            """Truncate text intelligently, keeping beginning and end if too long."""
+            if len(text) <= max_length:
+                return text
+            first_part = text[:int(max_length * 0.6)]
+            last_part = text[-int(max_length * 0.4):]
+            return f"{first_part}\n\n[... content truncated ...]\n\n{last_part}"
+
+        website_text_processed = smart_truncate(website_text, MAX_TEXT_LENGTH)
+        transcript_text_processed = smart_truncate(transcript_text, MAX_TEXT_LENGTH)
+
+        return f"- Firmenname: {company_name}\n- Website-Inhalt: {website_text_processed}\n- Besprechungsprotokoll: {transcript_text_processed}"
 
 
 def _split_sections_into_batches(sections: List[dict], batch_size: int = 4) -> List[List[dict]]:
@@ -564,7 +923,7 @@ def _split_sections_into_batches(sections: List[dict], batch_size: int = 4) -> L
     """
     batches = []
     current_batch = []
-    
+
     for section in sections:
         current_batch.append(section)
         if len(current_batch) >= batch_size:
@@ -572,11 +931,11 @@ def _split_sections_into_batches(sections: List[dict], batch_size: int = 4) -> L
             current_batch = []
             # Vary batch size slightly (3-5) for better distribution
             batch_size = 3 if batch_size == 5 else 5 if batch_size == 3 else 4
-    
+
     # Add remaining sections as final batch
     if current_batch:
         batches.append(current_batch)
-    
+
     return batches
 
 
@@ -586,60 +945,60 @@ def _generate_batch_content(
     company_name: str,
     website_text: str,
     transcript_text: str,
+    company_profile: Optional[Dict[str, Any]] = None,
+    company_id: Optional[int] = None,
     max_retries: int = 2
 ) -> dict:
     """
     ROLE: INITIAL GENERATION
-    
+
     Creates section content from scratch for empty or new sections.
     Used ONLY during first draft generation via /generate-content endpoint.
-    
+
     This function:
     - Assumes sections are empty or need initial content
     - Focuses on creation and expansion
     - Can be creative and comprehensive
     - Generates content based on company data and style references
-    
+
     This function must NOT:
     - Be used for chat-based editing
     - Modify existing section content
     - Be called from /chat endpoint
-    
+
     Returns a dictionary mapping section_id to generated content.
     Implements retry logic with strict JSON validation.
     """
-    # Build headings list for this batch
+    # Build headings list for this batch (exclude milestone tables)
     headings_list = []
     section_ids = []
     for section in batch_sections:
+        # Skip milestone tables - they should not be AI-generated
+        if section.get('type') == 'milestone_table':
+            continue
         section_id = section.get('id', '')
         section_title = section.get('title', '')
         # Remove numbering prefix from title
         clean_title = re.sub(r'^[\d.]+\.\s*', '', section_title)
         headings_list.append(f"{section_id}. {clean_title}")
         section_ids.append(section_id)
-    
+
     headings_text = "\n".join(headings_list)
-    
-    # Smart truncation for company data
-    MAX_TEXT_LENGTH = 50000
-    
-    def smart_truncate(text: str, max_length: int) -> str:
-        """Truncate text intelligently, keeping beginning and end if too long."""
-        if len(text) <= max_length:
-            return text
-        first_part = text[:int(max_length * 0.6)]
-        last_part = text[-int(max_length * 0.4):]
-        return f"{first_part}\n\n[... content truncated ...]\n\n{last_part}"
-    
-    website_text_processed = smart_truncate(website_text, MAX_TEXT_LENGTH)
-    transcript_text_processed = smart_truncate(transcript_text, MAX_TEXT_LENGTH)
-    
+
+    # Phase 2D: Format company context using structured profile (primary) or raw text (fallback)
+    company_context = _format_company_context_for_prompt(
+        company_profile=company_profile,
+        company_name=company_name,
+        website_text=website_text,
+        transcript_text=transcript_text,
+        company_id=company_id
+    )
+
     # IMPORTANT: This prompt is for INITIAL CONTENT GENERATION only.
     # It assumes empty sections and focuses on creation.
     # Do NOT reuse this prompt for chat-based editing.
     # For editing existing content, use _generate_section_content() instead.
-    
+
     # Build prompt with PDF style reference instructions
     prompt = f"""Sie sind ein Expertenberater, der bei der Erstellung einer "Vorhabensbeschreibung" für einen Förderantrag hilft.
 
@@ -652,7 +1011,7 @@ Diese PDFs dienen AUSSCHLIESSLICH als Stilreferenzen für:
 - Formalisierungsgrad
 - Fördermittel-typische Struktur
 
-KRITISCH: 
+KRITISCH:
 - Kopieren Sie KEINEN Inhalt aus diesen PDFs
 - Paraphrasieren Sie KEINEN Inhalt aus diesen PDFs
 - Verwenden Sie KEINE Fakten aus diesen Dokumenten
@@ -660,9 +1019,7 @@ KRITISCH:
 - Alle faktischen Inhalte müssen AUSSCHLIESSLICH aus den untenstehenden Firmeninformationen stammen
 
 Firmeninformationen:
-- Firmenname: {company_name}
-- Website-Inhalt: {website_text_processed}
-- Besprechungsprotokoll: {transcript_text_processed}
+{company_context}
 
 Die folgenden Abschnitte müssen generiert werden:
 {headings_text}
@@ -709,50 +1066,50 @@ Geben Sie KEIN Markdown-Format, KEINE Erklärungen und KEINEN Text außerhalb de
                 response_format={"type": "json_object"},
                 timeout=120.0  # 2 minute timeout for production safety
             )
-            
+
             response_text = response.choices[0].message.content
             logger.info(f"OpenAI response received for batch (attempt {attempt + 1})")
-            
+
             # Strict JSON validation
             try:
                 generated_content = json.loads(response_text)
-                
+
                 # Validate that all expected section IDs are present
                 missing_ids = [sid for sid in section_ids if sid not in generated_content]
                 if missing_ids:
                     raise ValueError(f"Missing section IDs in response: {missing_ids}")
-                
+
                 # Validate that all values are strings
                 for sid, content in generated_content.items():
                     if not isinstance(content, str):
                         raise ValueError(f"Content for section {sid} is not a string: {type(content)}")
                     if sid not in section_ids:
                         logger.warning(f"Unexpected section ID in response: {sid}")
-                
+
                 logger.info(f"Successfully validated JSON for batch with {len(generated_content)} sections")
                 return generated_content
-                
+
             except json.JSONDecodeError as e:
                 error_msg = f"JSON parse error (attempt {attempt + 1}/{max_retries + 1}): {str(e)}. Response preview: {response_text[:200]}"
                 logger.warning(error_msg)
                 if attempt < max_retries:
                     continue
-                raise ValueError(f"Failed to parse JSON after {max_retries + 1} attempts: {str(e)}")
-                
+                raise ValueError(f"Failed to parse JSON after {max_retries + 1} attempts: {str(e)}") from e
+
             except ValueError as e:
                 error_msg = f"JSON validation error (attempt {attempt + 1}/{max_retries + 1}): {str(e)}"
                 logger.warning(error_msg)
                 if attempt < max_retries:
                     continue
                 raise
-                
+
         except Exception as e:
             if attempt < max_retries:
                 logger.warning(f"OpenAI API error (attempt {attempt + 1}/{max_retries + 1}): {str(e)}. Retrying...")
                 continue
             logger.error(f"OpenAI API error after {max_retries + 1} attempts: {str(e)}")
             raise
-    
+
     # Should never reach here, but just in case
     raise ValueError("Failed to generate content after all retries")
 
@@ -763,26 +1120,26 @@ Geben Sie KEIN Markdown-Format, KEINE Erklärungen und KEINEN Text außerhalb de
 )
 def generate_content(
     document_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     ROLE: INITIAL CONTENT GENERATION
-    
+
     Generate content for Vorhabensbeschreibung document using OpenAI with chunked generation.
     Requires company preprocessing to be completed.
     Generates content in batches of 3-5 sections for reliability and efficiency.
-    
+
     This endpoint:
     - Creates initial content for empty sections
     - Uses _generate_batch_content() for generation logic
     - Assumes sections exist but have no content yet
-    
+
     This endpoint must NOT:
     - Call _generate_section_content() (that's for editing only)
     - Be used for modifying existing content (use /chat instead)
     """
-    
+
     # Load document
     document = _safe_get_document_by_id(document_id, db)
     if not document:
@@ -790,14 +1147,14 @@ def generate_content(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
     # Verify document type
     if document.type != "vorhabensbeschreibung":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Content generation only supported for vorhabensbeschreibung documents"
         )
-    
+
     # Load associated company and verify ownership
     company = db.query(Company).filter(
         Company.id == document.company_id,
@@ -808,14 +1165,14 @@ def generate_content(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
     # Check processing status
     if company.processing_status != "done":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Company preprocessing not finished"
         )
-    
+
     # Load confirmed headings from document
     content_json = document.content_json
     if not content_json or "sections" not in content_json:
@@ -823,14 +1180,14 @@ def generate_content(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document has no sections. Please create and confirm headings first."
         )
-    
+
     sections = content_json["sections"]
     if not sections or len(sections) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document has no confirmed headings. Please create and confirm headings first."
         )
-    
+
     # Get OpenAI API key from environment
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -838,7 +1195,7 @@ def generate_content(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="OpenAI API key not configured. Set OPENAI_API_KEY environment variable."
         )
-    
+
     # Initialize OpenAI client
     try:
         client = OpenAI(api_key=api_key)
@@ -847,32 +1204,39 @@ def generate_content(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to initialize OpenAI client: {str(e)}"
-        )
-    
+        ) from e
+
     # Prepare company data
     company_name = company.name or "Unknown Company"
     website_text = company.website_text or ""
     transcript_text = company.transcript_text or ""
-    
-    # Split sections into batches (3-5 sections per batch)
-    batches = _split_sections_into_batches(sections, batch_size=4)
-    logger.info(f"Split {len(sections)} sections into {len(batches)} batches for document {document_id}")
-    
-    # Initialize section content map (preserve existing content)
+    company_profile = company.company_profile  # Phase 2D: Use structured profile if available
+
+    # Filter out milestone tables from content generation (they should not be AI-generated)
+    text_sections = [s for s in sections if s.get("type") != "milestone_table"]
+    milestone_sections = [s for s in sections if s.get("type") == "milestone_table"]
+
+    # Split only text sections into batches (3-5 sections per batch)
+    batches = _split_sections_into_batches(text_sections, batch_size=4)
+    logger.info(f"Split {len(text_sections)} text sections into {len(batches)} batches for document {document_id}")
+    if milestone_sections:
+        logger.info(f"Excluded {len(milestone_sections)} milestone table(s) from content generation")
+
+    # Initialize section content map (preserve existing content for all sections)
     section_content_map = {}
     for section in sections:
         section_id = section.get("id", "")
         existing_content = section.get("content", "")
         section_content_map[section_id] = existing_content
-    
+
     # Process each batch
     successful_batches = 0
     failed_batches = []
-    
+
     for batch_idx, batch in enumerate(batches):
         try:
             logger.info(f"Processing batch {batch_idx + 1}/{len(batches)} with {len(batch)} sections")
-            
+
             # Generate content for this batch
             # NOTE: This calls _generate_batch_content (INITIAL GENERATION role)
             # This is correct - we are generating initial content, not editing existing content
@@ -882,36 +1246,45 @@ def generate_content(
                 company_name=company_name,
                 website_text=website_text,
                 transcript_text=transcript_text,
+                company_profile=company_profile,  # Phase 2D: Pass structured profile
+                company_id=company.id,  # Guardrail A: Pass company_id for logging
                 max_retries=2
             )
-            
+
             # Merge batch content into section map
             for section_id, content in batch_content.items():
                 if section_id in section_content_map:
                     section_content_map[section_id] = content
                 else:
                     logger.warning(f"Generated content for unexpected section ID: {section_id}")
-            
+
             # Persist incrementally after each successful batch
             updated_sections = []
             for section in sections:
                 section_id = section.get("id", "")
                 section_title = section.get("title", "")
+                section_type = section.get("type", "text")  # Preserve type field
                 content = section_content_map.get(section_id, section.get("content", ""))
-                
+
+                # Don't overwrite milestone table content with text - skip generation for milestone tables
+                if section_type == "milestone_table":
+                    # Keep existing milestone table structure, don't replace with generated text
+                    content = section.get("content", "")
+
                 updated_sections.append({
                     "id": section_id,
                     "title": section_title,
+                    "type": section_type,  # Preserve type field
                     "content": content
                 })
-            
+
             document.content_json = {"sections": updated_sections}
             db.commit()
             db.refresh(document)
-            
+
             successful_batches += 1
             logger.info(f"Successfully processed and persisted batch {batch_idx + 1}/{len(batches)}")
-            
+
         except Exception as e:
             # Log error but continue with other batches
             batch_section_ids = [s.get("id", "") for s in batch]
@@ -924,22 +1297,22 @@ def generate_content(
                 "error": str(e)
             })
             # Continue with next batch - partial success is preserved
-    
+
     # Final status check
     if successful_batches == 0:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate content for all batches. Errors: {[b['error'] for b in failed_batches]}"
         )
-    
+
     if failed_batches:
         logger.warning(f"Completed generation with {len(failed_batches)} failed batches out of {len(batches)} total")
         # Partial success - return what we have, but log the failures
-    
+
     # Final refresh to ensure we return the latest state
     db.refresh(document)
     logger.info(f"Successfully completed content generation for document {document_id}: {successful_batches}/{len(batches)} batches succeeded")
-    
+
     return document
 
 
@@ -949,7 +1322,7 @@ def _normalize_section_id(section_id: str) -> str:
     1. Converting commas to dots (e.g., "1,1" -> "1.1")
     2. Stripping trailing dots and whitespace
     3. Removing extra spaces
-    
+
     Examples:
     - "2.1." -> "2.1"
     - "2.1 " -> "2.1"
@@ -959,61 +1332,61 @@ def _normalize_section_id(section_id: str) -> str:
     """
     if not section_id:
         return section_id
-    
+
     # Convert commas to dots (common mistake: "1,1" instead of "1.1")
     normalized = section_id.replace(',', '.')
-    
+
     # Remove spaces around dots (e.g., "1. 1" -> "1.1", "1 , 1" -> "1.1")
     normalized = re.sub(r'\s*\.\s*', '.', normalized)
-    
+
     # Strip trailing dots and whitespace
     normalized = normalized.rstrip('.').strip()
-    
+
     return normalized
 
 
 def _find_section_by_title(
-    user_input: str, 
-    sections: List[dict], 
+    user_input: str,
+    sections: List[dict],
     threshold: float = 0.8
 ) -> Optional[str]:
     """
     Find section ID by matching title using fuzzy matching.
-    
+
     Strategy:
     1. Exact match (normalized, case-insensitive)
     2. Partial match (title contains input or vice versa)
     3. Fuzzy match using SequenceMatcher (similarity >= threshold)
-    
+
     Returns section_id if found, None otherwise.
     """
     if not user_input or not sections:
         return None
-    
+
     from difflib import SequenceMatcher
-    
+
     # Normalize user input
     user_input_normalized = user_input.lower().strip()
-    
+
     # Build title-to-ID mapping with normalized titles
     title_matches = []  # List of (section_id, normalized_title, similarity_score)
-    
+
     for section in sections:
         section_id = section.get("id", "")
         section_title = section.get("title", "")
-        
+
         if not section_title or not section_id:
             continue
-        
+
         # Remove numbering prefix (e.g., "2.1. Firmengeschichte" -> "Firmengeschichte")
         clean_title = re.sub(r'^[\d.]+\.\s*', '', section_title).strip()
         normalized_title = clean_title.lower()
-        
+
         # Strategy 1: Exact match (normalized)
         if normalized_title == user_input_normalized:
             logger.debug(f"Exact title match: '{user_input}' -> section {section_id}")
             return section_id
-        
+
         # Strategy 2: Partial match (contains)
         if user_input_normalized in normalized_title or normalized_title in user_input_normalized:
             # Calculate similarity for ranking
@@ -1021,13 +1394,13 @@ def _find_section_by_title(
             title_matches.append((section_id, clean_title, similarity))
             logger.debug(f"Partial title match: '{user_input}' ~ '{clean_title}' (similarity: {similarity:.2f})")
             continue
-        
+
         # Strategy 3: Fuzzy match
         similarity = SequenceMatcher(None, user_input_normalized, normalized_title).ratio()
         if similarity >= threshold:
             title_matches.append((section_id, clean_title, similarity))
             logger.debug(f"Fuzzy title match: '{user_input}' ~ '{clean_title}' (similarity: {similarity:.2f})")
-    
+
     # If we have matches, return the best one (highest similarity)
     if title_matches:
         # Sort by similarity (descending), then by section_id for consistency
@@ -1035,7 +1408,7 @@ def _find_section_by_title(
         best_match = title_matches[0]
         logger.info(f"Best title match: '{user_input}' -> section {best_match[0]} (similarity: {best_match[2]:.2f})")
         return best_match[0]
-    
+
     return None
 
 
@@ -1043,7 +1416,7 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
     """
     Enhanced flexible parser that understands various natural language formats.
     This parser is more permissive than the original but still deterministic and safe.
-    
+
     Supports formats like:
     - "Section 2.1: make it more concise"
     - "2.1: make it innovative"
@@ -1052,18 +1425,18 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
     - "Update 2.3 to emphasize sustainability"
     - "2.1: concise. 2.2: more technical"
     - "2.1, 2.3, and 2.5: make them all innovative"
-    
+
     Returns empty list if nothing reliable is found (no guessing).
     """
     logger.debug(f"_parse_section_changes_enhanced called with message: '{user_message}', valid_section_ids: {valid_section_ids}")
     changes = []
     message = user_message.strip()
-    
+
     # Strategy: Find all section references first, then extract instructions for each
-    
+
     # Find all potential section references with their positions
     section_matches = []
-    
+
     # NEW: Try to find sections by title first (if sections provided)
     if sections:
         # Pattern 1: "TitleName: instruction" or "TitleName - instruction"
@@ -1071,12 +1444,12 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
             re.compile(r'([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\s]{2,40}?)\s*[:]\s*(.+?)(?=\n|$|[\d.]+\s*:|[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\s]{2,40}?\s*:)', re.IGNORECASE),
             re.compile(r'([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\s]{2,40}?)\s*[-]\s*(.+?)(?=\n|$|[\d.]+\s*[-:]|section|abschnitt)', re.IGNORECASE),
         ]
-        
+
         for pattern in title_patterns:
             for match in pattern.finditer(message):
                 potential_title = match.group(1).strip()
                 instruction = match.group(2).strip() if len(match.groups()) > 1 else ""
-                
+
                 # Try to find section by title
                 section_id = _find_section_by_title(potential_title, sections, threshold=0.8)
                 if section_id and section_id in valid_section_ids and instruction and len(instruction) > 2:
@@ -1090,7 +1463,7 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
                     break
             if changes:
                 break  # If we found a title match, don't try other patterns
-        
+
         # Pattern 2: Standalone title word (e.g., just "Firmengeschichte" followed by instruction)
         # Only try this if no other patterns matched
         if not changes:
@@ -1099,11 +1472,11 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
             for match in standalone_title_pattern.finditer(message):
                 potential_title = match.group(1).strip()
                 instruction = match.group(2).strip() if len(match.groups()) > 1 else ""
-                
+
                 # Skip if it looks like a section number pattern (with dots or commas)
                 if re.match(r'^[\d.,]+$', potential_title):
                     continue
-                
+
                 # Try to find section by title
                 section_id = _find_section_by_title(potential_title, sections, threshold=0.8)
                 if section_id and section_id in valid_section_ids and instruction and len(instruction) > 2:
@@ -1113,12 +1486,12 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
                     })
                     logger.info(f"Found section by standalone title: '{potential_title}' -> {section_id}, instruction: '{instruction}'")
                     break
-    
+
     # Strategy: Find all section references first, then extract instructions for each
-    
+
     # Find all potential section references with their positions
     section_matches = []
-    
+
     # Pattern 1: "Section X.Y" or "Abschnitt X.Y" (also matches commas: "Section 1,1")
     pattern1 = re.compile(r'(?:section|abschnitt)\s+([\d.,]+)', re.IGNORECASE)
     for match in pattern1.finditer(message):
@@ -1130,7 +1503,7 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
                 'end': match.end(),
                 'type': 'explicit'
             })
-    
+
     # Pattern 2: "X.Y:" (direct section ID with colon, also matches commas: "1,1:")
     # Use negative lookbehind to avoid matching partial IDs (e.g., "4" from "2.4")
     pattern2 = re.compile(r'(?<![.,\d])([\d.,]+)\s*:', re.MULTILINE)
@@ -1145,7 +1518,7 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
                     'end': match.end(),
                     'type': 'colon'
                 })
-    
+
     # Pattern 3: "X.Y -" or "X.Y-" (dash format, also matches commas: "1,1 -")
     # Match section ID followed by dash, ensuring we get the full ID (e.g., "2.4" not just "4")
     # Use negative lookbehind to avoid matching partial IDs
@@ -1161,7 +1534,7 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
                     'end': match.end(),
                     'type': 'dash'
                 })
-    
+
     # Pattern 4: "Update/Rewrite section X.Y" or action verbs with section (also matches commas)
     pattern4 = re.compile(
         r'(?:update|rewrite|change|modify|edit|überarbeite|aktualisiere|ändere|verbessere|erweitere|kürze|betone)\s+(?:section|abschnitt)?\s*([\d.,]+)',
@@ -1178,7 +1551,7 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
                     'end': match.end(),
                     'type': 'action'
                 })
-    
+
     # Pattern 5: Standalone section ID at start of line or after punctuation (also matches commas)
     pattern5 = re.compile(r'(?:^|[\n\.])\s*([\d.,]+)\s+(?![\d.,])', re.MULTILINE)
     for match in pattern5.finditer(message):
@@ -1199,7 +1572,7 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
                             'end': match.end(),
                             'type': 'standalone'
                         })
-    
+
     # Remove duplicates (keep first occurrence)
     seen_ids = set()
     unique_matches = []
@@ -1210,36 +1583,36 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
             logger.debug(f"Added section match: id={match['id']}, type={match['type']}, position={match['start']}")
         else:
             logger.debug(f"Skipped duplicate section match: id={match['id']}, type={match['type']}, position={match['start']}")
-    
+
     # Sort by position in message
     unique_matches.sort(key=lambda x: x['start'])
     logger.debug(f"Final unique matches after sorting: {[m['id'] for m in unique_matches]}")
-    
+
     # Extract instruction for each section
     for i, sec_match in enumerate(unique_matches):
         section_id = sec_match['id']
         instruction_start = sec_match['end']
-        
+
         # Find where this instruction ends (next section or end of message)
         if i + 1 < len(unique_matches):
             instruction_end = unique_matches[i + 1]['start']
         else:
             instruction_end = len(message)
-        
+
         # Extract instruction text
         instruction_text = message[instruction_start:instruction_end].strip()
-        
+
         # Clean up instruction
         # Remove leading separators (colon, dash, whitespace)
         # Note: dash must be escaped or at end of character class to avoid being interpreted as range
         instruction_text = re.sub(r'^[-:\s]+', '', instruction_text)
-        
+
         # Remove trailing separators
         instruction_text = re.sub(r'\s*[-:\s]*$', '', instruction_text)
-        
+
         # Remove trailing punctuation that might be from sentence structure
         instruction_text = re.sub(r'[.,;]+$', '', instruction_text).strip()
-        
+
         # Validate instruction is meaningful
         if instruction_text and len(instruction_text) > 2:
             # Check if it's just another section reference (skip if so)
@@ -1255,7 +1628,7 @@ def _parse_section_changes_enhanced(user_message: str, valid_section_ids: List[s
                 logger.debug(f"Skipping instruction that looks like section reference: '{instruction_text}'")
         else:
             logger.debug(f"Skipping instruction (too short or empty): '{instruction_text}'")
-    
+
     logger.debug(f"_parse_section_changes_enhanced returning {len(changes)} changes: {changes}")
     return changes
 
@@ -1264,7 +1637,7 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
     """
     Parse user message to extract section IDs and their corresponding instructions.
     Returns a list of {section_id, instruction} dictionaries.
-    
+
     This is a deterministic, rule-based parser (not LLM-based).
     Supports multiple formats:
     - "Section 2.1: make it more concise"
@@ -1273,10 +1646,10 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
     - "2.1: make it shorter"
     """
     changes = []
-    
+
     # Normalize message
     message = user_message.strip()
-    
+
     # NEW: Try to find sections by title first (if sections provided)
     if sections:
         # Pattern 1: "TitleName: instruction" or "TitleName - instruction"
@@ -1284,12 +1657,12 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
             re.compile(r'([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\s]{2,40}?)\s*[:]\s*(.+?)(?=\n|$|[\d.]+\s*:|section|abschnitt)', re.IGNORECASE),
             re.compile(r'([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\s]{2,40}?)\s*[-]\s*(.+?)(?=\n|$|[\d.]+\s*[-:]|section|abschnitt)', re.IGNORECASE),
         ]
-        
+
         for pattern in title_patterns:
             for match in pattern.finditer(message):
                 potential_title = match.group(1).strip()
                 instruction = match.group(2).strip() if len(match.groups()) > 1 else ""
-                
+
                 # Try to find section by title
                 section_id = _find_section_by_title(potential_title, sections, threshold=0.8)
                 if section_id and section_id in valid_section_ids and instruction and len(instruction) > 2:
@@ -1302,7 +1675,7 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
                     break
             if changes:
                 break
-        
+
         # Pattern 2: Standalone title word (e.g., just "Firmengeschichte" followed by instruction)
         # Only try this if no other patterns matched
         if not changes:
@@ -1311,11 +1684,11 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
             for match in standalone_title_pattern.finditer(message):
                 potential_title = match.group(1).strip()
                 instruction = match.group(2).strip() if len(match.groups()) > 1 else ""
-                
+
                 # Skip if it looks like a section number pattern (with dots or commas)
                 if re.match(r'^[\d.,]+$', potential_title):
                     continue
-                
+
                 # Try to find section by title
                 section_id = _find_section_by_title(potential_title, sections, threshold=0.8)
                 if section_id and section_id in valid_section_ids and instruction and len(instruction) > 2:
@@ -1325,7 +1698,7 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
                     })
                     logger.info(f"Found section by standalone title: '{potential_title}' -> {section_id}, instruction: '{instruction}'")
                     break
-    
+
     # Pattern 1: "Section X.Y: instruction" or "Abschnitt X.Y: instruction" (with colon, also matches commas)
     pattern1 = re.compile(r'(?:section|abschnitt)\s+([\d.,]+)\s*:+\s*(.+?)(?=(?:section|abschnitt)\s+[\d.,]+|$)', re.IGNORECASE | re.DOTALL)
     matches1 = pattern1.findall(message)
@@ -1334,7 +1707,7 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
         instruction = instruction.strip()
         if section_id in valid_section_ids and instruction and len(instruction) > 3:
             changes.append({"section_id": section_id, "instruction": instruction})
-    
+
     # Pattern 2: "X.Y: instruction" (direct section ID with colon, also matches commas: "1,1:")
     pattern2 = re.compile(r'^([\d.,]+)\s*:+\s*(.+?)(?=\n|$|[\d.,]+\s*:+)', re.MULTILINE | re.IGNORECASE | re.DOTALL)
     matches2 = pattern2.findall(message)
@@ -1345,7 +1718,7 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
             # Avoid duplicates
             if not any(c["section_id"] == section_id for c in changes):
                 changes.append({"section_id": section_id, "instruction": instruction})
-    
+
     # Pattern 3: "Rewrite/Update section X.Y to..." or "Überarbeite Abschnitt X.Y zu..." (also matches commas)
     pattern3 = re.compile(r'(?:rewrite|update|change|modify|edit|überarbeite|aktualisiere|ändere|verbessere|erweitere|kürze|betone)\s+(?:section|abschnitt)?\s*([\d.,]+)\s+(?:to|zu|mit|dass|damit|so dass|um)\s+(.+)', re.IGNORECASE | re.DOTALL)
     matches3 = pattern3.findall(message)
@@ -1356,7 +1729,7 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
             # Avoid duplicates
             if not any(c["section_id"] == section_id for c in changes):
                 changes.append({"section_id": section_id, "instruction": instruction})
-    
+
     # Pattern 4: "Section X.Y" followed by instruction (without colon, separated by newline or period, also matches commas)
     # Only if no other patterns matched
     if not changes:
@@ -1368,7 +1741,7 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
             # Only add if it looks like an instruction (not just "section X.Y" alone)
             if section_id in valid_section_ids and instruction and len(instruction) > 5:
                 changes.append({"section_id": section_id, "instruction": instruction})
-    
+
     # Remove duplicates (keep first occurrence)
     seen = set()
     unique_changes = []
@@ -1376,7 +1749,7 @@ def _parse_section_changes(user_message: str, valid_section_ids: List[str], sect
         if change["section_id"] not in seen:
             seen.add(change["section_id"])
             unique_changes.append(change)
-    
+
     return unique_changes
 
 
@@ -1387,22 +1760,22 @@ def _validate_section_changes(changes: List[dict], valid_section_ids: List[str])
     """
     if not changes:
         return False, None
-    
+
     # Check all section IDs are valid
     invalid_ids = [c["section_id"] for c in changes if c["section_id"] not in valid_section_ids]
     if invalid_ids:
         return False, f"Ungültige Abschnitts-IDs gefunden: {', '.join(invalid_ids)}. Bitte geben Sie gültige Abschnittsnummern an (z.B. 1.1, 2.3)."
-    
+
     # Check all have instructions
     missing_instructions = [c["section_id"] for c in changes if not c.get("instruction") or len(c["instruction"].strip()) < 3]
     if missing_instructions:
         return False, f"Bitte geben Sie für Abschnitt {missing_instructions[0]} eine konkrete Anweisung an, was geändert werden soll."
-    
+
     return True, None
 
 
 def _determine_clarification_needed(
-    user_message: str, 
+    user_message: str,
     valid_section_ids: List[str],
     last_edited_sections: Optional[List[str]] = None
 ) -> Optional[str]:
@@ -1410,7 +1783,7 @@ def _determine_clarification_needed(
     Determine if clarification is needed before calling LLM.
     Returns conversational clarification question if needed, None if ready to proceed.
     This is a deterministic, rule-based check (not LLM-based).
-    
+
     Uses context (last_edited_sections) to suggest sections but never auto-applies.
     """
     logger.debug(f"_determine_clarification_needed called with message: '{user_message}', last_edited_sections: {last_edited_sections}")
@@ -1427,7 +1800,7 @@ def _determine_clarification_needed(
             return None  # No clarification needed
         if error_msg:
             return error_msg  # Return validation error
-    
+
     # Fallback to original parser
     try:
         changes_original = _parse_section_changes(user_message, valid_section_ids)
@@ -1442,7 +1815,7 @@ def _determine_clarification_needed(
                 return error_msg  # Return validation error
     except Exception as e:
         logger.error(f"Error in original parser: {str(e)}", exc_info=True)
-    
+
     # No valid changes found - need clarification
     # Check if message has action verbs (user wants to do something)
     action_pattern = re.compile(
@@ -1452,19 +1825,19 @@ def _determine_clarification_needed(
         re.IGNORECASE
     )
     has_action = bool(action_pattern.search(user_message))
-    
+
     # Check if any section IDs mentioned (even if not parsed correctly)
     section_refs = re.findall(r'\b([\d.]+)\b', user_message)
     potential_sections = [s for s in section_refs if s in valid_section_ids]
     invalid_sections = [s for s in section_refs if s not in valid_section_ids and re.match(r'^\d+(\.\d+)*$', s)]
-    
+
     # Case 1: Invalid section IDs found
     if invalid_sections:
         unique_invalid = list(set(invalid_sections))
         if len(unique_invalid) == 1:
             return f"Ich konnte Abschnitt {unique_invalid[0]} nicht finden. Bitte geben Sie eine gültige Abschnittsnummer an (z.B. 2.1, 3.2)."
         return f"Ich konnte die Abschnittsnummern {', '.join(unique_invalid)} nicht finden. Bitte geben Sie gültige Abschnittsnummern an (z.B. 2.1, 3.2)."
-    
+
     # Case 2: No sections mentioned at all
     if not potential_sections:
         if has_action:
@@ -1474,10 +1847,10 @@ def _determine_clarification_needed(
                     return f"Meinen Sie Abschnitt {last_edited_sections[0]}? Bitte bestätigen Sie, oder geben Sie die Abschnittsnummer an (z.B. 2.1 oder 2.1 und 2.3)."
                 else:
                     sections_str = ", ".join(last_edited_sections)
-                    return f"Welche Abschnitte sollen aktualisiert werden? Sie können mehrere angeben (z.B. 2.1 oder 2.1 und 2.3)."
+                    return "Welche Abschnitte sollen aktualisiert werden? Sie können mehrere angeben (z.B. 2.1 oder 2.1 und 2.3)."
             return "Welche Abschnitte sollen aktualisiert werden? Bitte geben Sie Abschnittsnummern an (z.B. 2.1 oder 2.1 und 2.3)."
         return "Bitte geben Sie an, welche Abschnitte geändert werden sollen und was genau geändert werden soll (z.B. '2.1: make it innovative' oder 'Section 2.1: make it more concise')."
-    
+
     # Case 3: Sections mentioned but couldn't parse instruction
     if has_action:
         if len(potential_sections) == 1:
@@ -1485,14 +1858,14 @@ def _determine_clarification_needed(
         else:
             sections_str = ", ".join(potential_sections)
             return f"Was soll in den Abschnitten {sections_str} geändert werden? Bitte geben Sie für jeden Abschnitt eine Anweisung an (z.B. '2.1: make it innovative. 2.2: fix the style')."
-    
+
     # Case 4: Sections mentioned but no action verb
     if len(potential_sections) == 1:
         return f"Was soll in Abschnitt {potential_sections[0]} geändert werden? Bitte geben Sie eine Anweisung an (z.B. 'make it more innovative' oder 'make it shorter')."
     else:
         sections_str = ", ".join(potential_sections)
         return f"Was soll in den Abschnitten {sections_str} geändert werden? Bitte geben Sie für jeden Abschnitt eine Anweisung an."
-    
+
     # Fallback (should not reach here)
     return "Bitte geben Sie an, welche Abschnitte geändert werden sollen und was genau geändert werden soll."
 
@@ -1505,57 +1878,54 @@ def _generate_section_content(
     instruction: str,
     company_name: str,
     website_text: str,
-    transcript_text: str
+    transcript_text: str,
+    company_profile: Optional[dict] = None,
+    company_id: Optional[int] = None
 ) -> str:
     """
     ROLE: SECTION EDITOR
-    
+
     Modifies EXISTING section content based on user editing instructions.
     Used ONLY for chat-based editing via /chat endpoint.
-    
+
     This function:
     - Assumes sections already have content that needs modification
     - Focuses on targeted editing and refinement
     - Is constrained and conservative (preserves existing structure)
     - Uses existing content as the primary basis for changes
-    
+
     This function must NOT:
     - Be used for initial content generation
     - Regenerate sections from scratch
     - Be called from /generate-content endpoint
-    
+
     Parameters:
     - current_content: The existing section content that will be modified
     - instruction: User's editing instruction (e.g., "make it more concise")
-    
+
     Returns the updated section content as a string.
     """
-    # Smart truncation for company data
-    MAX_TEXT_LENGTH = 50000
-    
-    def smart_truncate(text: str, max_length: int) -> str:
-        """Truncate text intelligently, keeping beginning and end if too long."""
-        if len(text) <= max_length:
-            return text
-        first_part = text[:int(max_length * 0.6)]
-        last_part = text[-int(max_length * 0.4):]
-        return f"{first_part}\n\n[... content truncated ...]\n\n{last_part}"
-    
-    website_text_processed = smart_truncate(website_text, MAX_TEXT_LENGTH)
-    transcript_text_processed = smart_truncate(transcript_text, MAX_TEXT_LENGTH)
-    
     # Remove numbering prefix from title
     clean_title = re.sub(r'^[\d.]+\.\s*', '', section_title)
-    
+
     # IMPORTANT:
     # This prompt is for EDITING existing content only.
     # Do NOT reuse this prompt for initial content generation.
     # For initial generation, use _generate_batch_content() instead.
     # This prompt assumes existing content exists and must be modified, not created.
-    
+
     # Get style reference text from PDFs (silent fallback if extraction fails)
     style_reference = _build_style_reference_text()
-    
+
+    # Phase 2D: Format company context using structured profile (primary) or raw text (fallback)
+    company_context = _format_company_context_for_prompt(
+        company_profile=company_profile,
+        company_name=company_name,
+        website_text=website_text,
+        transcript_text=transcript_text,
+        company_id=company_id
+    )
+
     # Build prompt - ADD style reference at the beginning, preserve all existing sections
     prompt = f"""{style_reference}SIE SIND EIN REDAKTEUR, KEIN AUTOR.
 
@@ -1579,14 +1949,12 @@ Benutzeranweisung: {instruction}
 
 KONTEXTNUTZUNG:
 
-- Verwenden Sie Website- und Besprechungsinformationen ausschließlich zur Präzisierung oder inhaltlichen Stützung.
+- Verwenden Sie Firmeninformationen ausschließlich zur Präzisierung oder inhaltlichen Stützung.
 - Fügen Sie keine neuen Themen ein, die im bestehenden Abschnitt nicht bereits angelegt sind.
 - Vermeiden Sie generische Aussagen ohne Bezug zum aktuellen Abschnitt.
 
 Firmeninformationen (NUR ZUR STÜTZUNG):
-- Firmenname: {company_name}
-- Website-Inhalt: {website_text_processed}
-- Besprechungsprotokoll: {transcript_text_processed}
+{company_context}
 
 UMGANG MIT ALLGEMEINEN ANWEISUNGEN:
 
@@ -1640,16 +2008,16 @@ WICHTIG:
             temperature=0.7,
             timeout=120.0  # 2 minute timeout for production safety
         )
-        
+
         generated_content = response.choices[0].message.content.strip()
-        
+
         # Clean up any markdown or JSON artifacts
         generated_content = re.sub(r'^```(?:json|markdown)?\s*\n?', '', generated_content)
         generated_content = re.sub(r'\n?```\s*$', '', generated_content)
         generated_content = generated_content.strip()
-        
+
         return generated_content
-        
+
     except Exception as e:
         logger.error(f"Failed to generate content for section {section_id}: {str(e)}")
         raise
@@ -1661,18 +2029,18 @@ def _is_question(message: str) -> bool:
     Questions typically start with question words or end with '?'.
     """
     message_lower = message.lower().strip()
-    
+
     # Check for question mark
     if message_lower.endswith('?'):
         return True
-    
+
     # Check for question words at the start
     question_words = ['what', 'how', 'why', 'when', 'where', 'who', 'which', 'can', 'could', 'should', 'would', 'is', 'are', 'was', 'were', 'do', 'does', 'did', 'will', 'tell me', 'explain', 'describe']
     first_word = message_lower.split()[0] if message_lower.split() else ""
-    
+
     if first_word in question_words:
         return True
-    
+
     # Check for question patterns
     question_patterns = [
         r'^what\s+',
@@ -1690,11 +2058,11 @@ def _is_question(message: str) -> bool:
         r'^explain',
         r'^describe',
     ]
-    
+
     for pattern in question_patterns:
         if re.match(pattern, message_lower):
             return True
-    
+
     return False
 
 
@@ -1717,9 +2085,9 @@ def _extract_context_for_question(
         section_content = section.get("content", "")
         if section_content and section_content.strip():
             document_content_parts.append(f"Section {section_id} ({section_title}): {section_content}")
-    
+
     full_document_content = "\n\n".join(document_content_parts) if document_content_parts else "No content generated yet."
-    
+
     # Extract website summary (200-500 chars)
     website_summary = ""
     if website_text:
@@ -1736,7 +2104,7 @@ def _extract_context_for_question(
                 website_summary = website_text[:500]
         else:
             website_summary = website_text
-    
+
     # Extract conversation history (last 2-3 messages)
     conversation_context = ""
     if conversation_history:
@@ -1749,7 +2117,7 @@ def _extract_context_for_question(
             if text:
                 conversation_parts.append(f"{role.capitalize()}: {text}")
         conversation_context = "\n".join(conversation_parts) if conversation_parts else ""
-    
+
     return {
         "document_content": full_document_content,
         "website_summary": website_summary,
@@ -1772,24 +2140,24 @@ def _save_chat_message(
     if document.chat_history is None:
         document.chat_history = []
         logger.debug(f"Initialized chat_history for document {document.id}")
-    
+
     # Create message object
     message = {
         "role": role,
         "text": text,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    
+
     # Add optional fields
     if suggested_content:
         message["suggestedContent"] = suggested_content
     if requires_confirmation:
         message["requiresConfirmation"] = True
         message["messageId"] = f"msg-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-    
+
     # Append to chat history
     document.chat_history.append(message)
-    
+
     # Save to database
     try:
         db.commit()
@@ -1815,18 +2183,18 @@ def _answer_question_with_context(
     """
     # Build context prompt
     context_parts = []
-    
+
     if document_content and document_content.strip() != "No content generated yet.":
         context_parts.append(f"Generated Document Content:\n{document_content}")
-    
+
     if website_summary:
         context_parts.append(f"Company Website Summary:\n{website_summary}")
-    
+
     if conversation_history:
         context_parts.append(f"Previous Conversation:\n{conversation_history}")
-    
+
     context_text = "\n\n".join(context_parts)
-    
+
     prompt = f"""Sie sind ein Expertenberater, der Fragen zu einem Förderantrag-Dokument (Vorhabensbeschreibung) beantwortet.
 
 KONTEXT:
@@ -1867,11 +2235,11 @@ Geben Sie NUR die Antwort zurück, ohne zusätzliche Erklärungen oder Formatier
             max_tokens=1000,  # Limit response length for concise answers
             timeout=120.0  # 2 minute timeout for production safety
         )
-        
+
         answer = response.choices[0].message.content.strip()
         logger.info(f"Generated answer for question: '{user_query[:50]}...' (answer length: {len(answer)})")
         return answer
-        
+
     except Exception as e:
         logger.error(f"Error generating answer: {str(e)}")
         raise
@@ -1884,26 +2252,26 @@ Geben Sie NUR die Antwort zurück, ohne zusätzliche Erklärungen oder Formatier
 def chat_with_document(
     document_id: int,
     chat_request: ChatRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     ROLE: CHAT-BASED SECTION EDITING
-    
+
     Chat endpoint for section-scoped editing of Vorhabensbeschreibung documents.
     Only calls LLM when user explicitly specifies section(s) and change instruction(s).
     Otherwise asks clarification questions.
-    
+
     This endpoint:
     - Modifies existing section content based on user instructions
     - Uses _generate_section_content() for editing logic
     - Assumes sections already have content that needs modification
-    
+
     This endpoint must NOT:
     - Call _generate_batch_content() (that's for initial generation only)
     - Be used for creating initial content (use /generate-content instead)
     """
-    
+
     # Load document
     document = _safe_get_document_by_id(document_id, db)
     if not document:
@@ -1911,14 +2279,14 @@ def chat_with_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
     # Verify document type
     if document.type != "vorhabensbeschreibung":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Chat editing only supported for vorhabensbeschreibung documents"
         )
-    
+
     # Load associated company and verify ownership
     company = db.query(Company).filter(
         Company.id == document.company_id,
@@ -1929,7 +2297,7 @@ def chat_with_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
     # Load document sections
     content_json = document.content_json
     if not content_json or "sections" not in content_json:
@@ -1937,35 +2305,36 @@ def chat_with_document(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document has no sections"
         )
-    
+
     sections = content_json["sections"]
     if not sections:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document has no sections"
         )
-    
+
     # Get valid section IDs
     valid_section_ids = [section.get("id", "") for section in sections if section.get("id")]
-    
+
     # Get context (last edited sections) from request if available
-    last_edited_sections = chat_request.last_edited_sections
+    # Reserved for future use - not currently used in this function
+    _last_edited_sections = chat_request.last_edited_sections
     conversation_history = chat_request.conversation_history or []
-    
+
     # Check if message is a question
     is_question = _is_question(chat_request.message)
-    
+
     if is_question:
         # Handle question-answering with full context
         logger.info(f"Detected question: '{chat_request.message[:50]}...'")
-        
+
         # Extract context
         context = _extract_context_for_question(
             sections=sections,
             website_text=company.website_text or "",
             conversation_history=conversation_history
         )
-        
+
         # Get OpenAI API key
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -1973,7 +2342,7 @@ def chat_with_document(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="OpenAI API key not configured. Set OPENAI_API_KEY environment variable."
             )
-        
+
         # Initialize OpenAI client
         try:
             client = OpenAI(api_key=api_key)
@@ -1982,8 +2351,8 @@ def chat_with_document(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to initialize OpenAI client: {str(e)}"
-            )
-        
+            ) from e
+
         # Answer the question with context
         try:
             answer = _answer_question_with_context(
@@ -1994,13 +2363,13 @@ def chat_with_document(
                 conversation_history=context["conversation_history"],
                 company_name=company.name or "Unknown Company"
             )
-            
+
             logger.info(f"Question answered successfully (answer length: {len(answer)})")
-            
+
             # Save user message and assistant response to chat history
             _save_chat_message(document, "user", chat_request.message, db=db)
             _save_chat_message(document, "assistant", answer, db=db)
-            
+
             # Return answer without updating any sections
             # The frontend will display the answer in chat
             return ChatResponse(
@@ -2008,31 +2377,31 @@ def chat_with_document(
                 updated_sections=None,
                 is_question=True
             )
-            
+
         except Exception as e:
             logger.error(f"Error answering question: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to answer question: {str(e)}"
-            )
-    
+            ) from e
+
     # If not a question, proceed with section editing logic
     logger.info(f"Message is not a question - proceeding with section editing: '{chat_request.message[:50]}...'")
-    
+
     # Save user message to chat history
     _save_chat_message(document, "user", chat_request.message, db=db)
-    
+
     # Parse section changes: try enhanced parser first, fallback to original
     changes = _parse_section_changes_enhanced(chat_request.message, valid_section_ids, sections)
-    
+
     # If enhanced parser found nothing, try original parser
     if not changes:
         changes = _parse_section_changes(chat_request.message, valid_section_ids, sections)
-    
+
     # If still no changes found, create a default change with raw message
     # (This allows testing even with ambiguous requests)
     if not changes:
-        logger.warning(f"No sections parsed from message, creating default change with first section")
+        logger.warning("No sections parsed from message, creating default change with first section")
         if valid_section_ids:
             # Use first section as default
             changes = [{
@@ -2045,13 +2414,13 @@ def chat_with_document(
                 message="Document has no sections to update.",
                 updated_sections=None
             )
-    
+
     # Validate changes (keep this for safety, but log warnings and continue)
     is_valid, error_msg = _validate_section_changes(changes, valid_section_ids)
     if not is_valid:
         logger.warning(f"Validation failed but proceeding anyway for testing: {error_msg}")
         # Continue anyway for testing - don't return error
-    
+
     # Get OpenAI API key
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -2059,7 +2428,7 @@ def chat_with_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="OpenAI API key not configured. Set OPENAI_API_KEY environment variable."
         )
-    
+
     # Initialize OpenAI client
     try:
         client = OpenAI(api_key=api_key)
@@ -2068,32 +2437,33 @@ def chat_with_document(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to initialize OpenAI client: {str(e)}"
-        )
-    
+        ) from e
+
     # Prepare company data
     company_name = company.name or "Unknown Company"
     website_text = company.website_text or ""
     transcript_text = company.transcript_text or ""
-    
+    company_profile = company.company_profile  # Phase 2D: Use structured profile if available
+
     # Process each section change
     updated_section_ids = []
     suggested_content_map = {}  # Map of section_id -> suggested_content for preview
     # Create a map for quick lookup, but we'll update the original sections list
     section_map = {section.get("id"): idx for idx, section in enumerate(sections)}
-    
+
     for change in changes:
         section_id = change["section_id"]
         instruction = change["instruction"]
-        
+
         if section_id not in section_map:
             logger.warning(f"Section {section_id} not found in document")
             continue
-        
+
         section_idx = section_map[section_id]
         section = sections[section_idx]
         section_title = section.get("title", "")
         current_content = section.get("content", "")
-        
+
         try:
             # Generate updated content
             # NOTE: This calls _generate_section_content (SECTION EDITOR role)
@@ -2101,7 +2471,7 @@ def chat_with_document(
             logger.info(f"Calling LLM for section {section_id} with instruction: '{instruction}'")
             logger.info(f"Current content length: {len(current_content)} characters")
             logger.info(f"Current content preview: {current_content[:100] if current_content else '(empty)'}")
-            
+
             new_content = _generate_section_content(
                 client=client,
                 section_id=section_id,
@@ -2110,36 +2480,37 @@ def chat_with_document(
                 instruction=instruction,
                 company_name=company_name,
                 website_text=website_text,
-                transcript_text=transcript_text
+                transcript_text=transcript_text,
+                company_profile=company_profile,  # Phase 2D: Pass structured profile
+                company_id=company.id  # Guardrail A: Pass company_id for logging
             )
-            
+
             logger.info(f"LLM returned content length: {len(new_content)} characters")
             logger.info(f"LLM returned content preview: {new_content[:200]}")
             logger.info(f"Content changed: {new_content != current_content}")
-            
+
             # Check if content actually changed (not just whitespace/formatting)
             content_changed = new_content.strip() != current_content.strip()
             if not content_changed:
                 logger.warning(f"LLM returned identical content for section {section_id} - content was not actually modified!")
-                logger.warning(f"Instruction was: '{instruction}'")
-                logger.warning(f"This may indicate the LLM did not follow the rewrite/expand instruction properly")
-            
+                logger.warning("This may indicate the LLM did not follow the rewrite/expand instruction properly")
+
             # Check if content is significantly longer (for expand/add instructions)
             length_increase = len(new_content) - len(current_content)
             length_increase_percent = (length_increase / len(current_content) * 100) if current_content else 0
             logger.info(f"Content length change: {length_increase} characters ({length_increase_percent:.1f}% increase)")
-            
+
             # Store suggested content (DO NOT update section yet - wait for confirmation)
             # Build map of section_id -> suggested_content for preview
             suggested_content_map[section_id] = new_content
             updated_section_ids.append(section_id)
             logger.info(f"Successfully generated suggested content for section {section_id} for document {document_id} (preview mode)")
-            
+
         except Exception as e:
             logger.error(f"Failed to generate content for section {section_id}: {str(e)}")
             # Continue with other sections even if one fails
             continue
-    
+
     # Return preview instead of saving (user must confirm first)
     if updated_section_ids:
         # Generate preview response message
@@ -2149,19 +2520,19 @@ def chat_with_document(
             else:
                 sections_str = ", ".join(updated_section_ids)
                 response_message = f"Ich habe Änderungen für die Abschnitte {sections_str} vorbereitet. Bitte überprüfen Sie die Vorschau und bestätigen Sie die Änderungen."
-            
+
             logger.info(f"Returning ChatResponse with preview for {len(updated_section_ids)} sections: {updated_section_ids}")
-            
+
             # Save assistant response with preview to chat history
             _save_chat_message(
-                document, 
-                "assistant", 
-                response_message, 
+                document,
+                "assistant",
+                response_message,
                 suggested_content=suggested_content_map,
                 requires_confirmation=True,
                 db=db
             )
-            
+
             response = ChatResponse(
                 message=response_message,
                 suggested_content=suggested_content_map,
@@ -2169,14 +2540,14 @@ def chat_with_document(
                 updated_sections=None,  # Not updated yet - waiting for confirmation
                 is_question=False  # Explicitly mark as section edit, not question
             )
-            logger.info(f"ChatResponse with preview created successfully, returning...")
+            logger.info("ChatResponse with preview created successfully, returning...")
             return response
         except Exception as e:
             logger.error(f"Error creating ChatResponse: {str(e)}", exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to create response: {str(e)}"
-            )
+            ) from e
     else:
         # No sections were updated (all failed)
         error_message = "Entschuldigung, es konnte kein Abschnitt aktualisiert werden. Bitte versuchen Sie es erneut mit spezifischeren Anweisungen."
@@ -2195,14 +2566,14 @@ def chat_with_document(
 def confirm_chat_edit(
     document_id: int,
     confirmation: ChatConfirmationRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Apply confirmed edit to a section.
     This endpoint is called when user approves a suggested edit from the preview.
     """
-    
+
     # Load document
     document = _safe_get_document_by_id(document_id, db)
     if not document:
@@ -2210,7 +2581,7 @@ def confirm_chat_edit(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
     # Verify company belongs to current user
     company = db.query(Company).filter(
         Company.id == document.company_id,
@@ -2221,14 +2592,14 @@ def confirm_chat_edit(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
     # Verify document type
     if document.type != "vorhabensbeschreibung":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Chat confirmation only supported for vorhabensbeschreibung documents"
         )
-    
+
     # Load document sections
     content_json = document.content_json
     if not content_json or "sections" not in content_json:
@@ -2236,19 +2607,19 @@ def confirm_chat_edit(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document has no sections"
         )
-    
+
     sections = content_json["sections"]
     if not sections:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document has no sections"
         )
-    
+
     # Find the section to update
     section_found = False
     logger.info(f"Looking for section {confirmation.section_id} in document {document_id}")
     logger.info(f"Available section IDs: {[s.get('id') for s in sections]}")
-    
+
     for section in sections:
         section_id = section.get("id", "")
         if section_id == confirmation.section_id:
@@ -2259,87 +2630,87 @@ def confirm_chat_edit(
             logger.info(f"Updating section {confirmation.section_id} with confirmed content (old length: {old_content_length}, new length: {len(confirmation.confirmed_content)})")
             logger.info(f"New content preview: {confirmation.confirmed_content[:200]}...")
             break
-    
+
     if not section_found:
         logger.error(f"Section {confirmation.section_id} not found in document {document_id}. Available sections: {[s.get('id') for s in sections]}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Section {confirmation.section_id} not found in document. Available sections: {', '.join([s.get('id', '') for s in sections])}"
         )
-    
+
     # Rebuild sections array preserving order
     # IMPORTANT: Verify the updated content is in the sections list before rebuilding
     updated_sections = []
     for section in sections:
         section_id = section.get("id", "")
         section_content = section.get("content", "")
-        
+
         # Log if this is the section we just updated
         if section_id == confirmation.section_id:
             logger.info(f"Rebuilding section {section_id} with content length: {len(section_content)} (expected: {len(confirmation.confirmed_content)})")
             if section_content != confirmation.confirmed_content:
                 logger.error(f"ERROR: Section {section_id} content mismatch during rebuild! Setting correct content.")
                 section_content = confirmation.confirmed_content  # Force correct content
-        
+
         updated_sections.append({
             "id": section_id,
             "title": section.get("title", ""),
             "content": section_content
         })
-    
+
     # Verify the updated section is in the rebuilt array
     rebuilt_section = next((s for s in updated_sections if s.get("id") == confirmation.section_id), None)
     if rebuilt_section:
         logger.info(f"Rebuilt section {confirmation.section_id} content length: {len(rebuilt_section.get('content', ''))}")
         if rebuilt_section.get("content") != confirmation.confirmed_content:
-            logger.error(f"ERROR: Rebuilt section content doesn't match! Forcing correct content.")
+            logger.error("ERROR: Rebuilt section content doesn't match! Forcing correct content.")
             rebuilt_section["content"] = confirmation.confirmed_content
-    
+
     # Update document in database
     # IMPORTANT: Create a new dict to ensure SQLAlchemy detects the change
     document.content_json = {"sections": updated_sections}
-    
+
     # Mark the JSON column as modified so SQLAlchemy knows to update it
     # This is REQUIRED when modifying nested JSON structures - SQLAlchemy doesn't detect nested changes automatically
     flag_modified(document, "content_json")
-    
+
     try:
         db.commit()
         db.refresh(document)
-        
+
         # Verify the content was actually saved
         saved_section = None
         for s in document.content_json.get("sections", []):
             if s.get("id") == confirmation.section_id:
                 saved_section = s
                 break
-        
+
         if saved_section:
             saved_content = saved_section.get("content", "")
             logger.info(f"Successfully saved confirmed edit for section {confirmation.section_id} in document {document_id}")
             logger.info(f"Verified saved content length: {len(saved_content)} (expected: {len(confirmation.confirmed_content)})")
             if saved_content != confirmation.confirmed_content:
-                logger.error(f"ERROR: Saved content does not match confirmed content!")
+                logger.error("ERROR: Saved content does not match confirmed content!")
                 logger.error(f"Expected preview: {confirmation.confirmed_content[:200]}...")
                 logger.error(f"Got preview: {saved_content[:200]}...")
                 # This is a critical error - raise an exception
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to save content: content mismatch after save"
+                    detail="Failed to save content: content mismatch after save"
                 )
             else:
-                logger.info(f"✓ Content verified successfully - saved content matches confirmed content")
+                logger.info("✓ Content verified successfully - saved content matches confirmed content")
         else:
             logger.error(f"ERROR: Section {confirmation.section_id} not found in saved document!")
-            
+
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to save confirmed edit for document {document_id}: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to save confirmed edit: {str(e)}"
-        )
-    
+        ) from e
+
     # Return success response
     return ChatResponse(
         message=f"Änderung für Abschnitt {confirmation.section_id} wurde bestätigt und gespeichert.",
@@ -2353,13 +2724,13 @@ def confirm_chat_edit(
 def export_document(
     document_id: int,
     format: str = "pdf",  # "pdf" or "docx"
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
     Export document as PDF or DOCX file.
     """
-    
+
     # Load document
     document = _safe_get_document_by_id(document_id, db)
     if not document:
@@ -2367,7 +2738,7 @@ def export_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    
+
     # Load associated company for filename and verify ownership
     company = db.query(Company).filter(
         Company.id == document.company_id,
@@ -2381,7 +2752,7 @@ def export_document(
     company_name = company.name
     # Sanitize filename
     safe_company_name = re.sub(r'[^\w\s-]', '', company_name).strip().replace(' ', '_')
-    
+
     # Get document content
     content_json = document.content_json
     if not content_json or "sections" not in content_json:
@@ -2389,23 +2760,22 @@ def export_document(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document has no content to export"
         )
-    
+
     sections = content_json["sections"]
-    
+
     if format.lower() == "pdf":
         try:
             from reportlab.lib.pagesizes import A4
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.lib.units import inch
             from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
             from reportlab.lib.enums import TA_LEFT
-            
+
             # Create PDF in memory
             buffer = io.BytesIO()
             doc = SimpleDocTemplate(buffer, pagesize=A4)
             story = []
             styles = getSampleStyleSheet()
-            
+
             # Custom styles
             title_style = ParagraphStyle(
                 'CustomTitle',
@@ -2415,7 +2785,7 @@ def export_document(
                 spaceAfter=12,
                 fontName='Helvetica-Bold'
             )
-            
+
             content_style = ParagraphStyle(
                 'CustomContent',
                 parent=styles['Normal'],
@@ -2425,12 +2795,12 @@ def export_document(
                 leftIndent=0,
                 alignment=TA_LEFT
             )
-            
+
             # Add sections to PDF
             for section in sections:
                 title = section.get("title", "")
                 content = section.get("content", "")
-                
+
                 # Ensure content is a string (handle dict/other types)
                 if not isinstance(content, str):
                     if isinstance(content, dict):
@@ -2440,22 +2810,22 @@ def export_document(
                         content = ""
                     else:
                         content = str(content)
-                
+
                 if title:
                     story.append(Paragraph(title, title_style))
                     story.append(Spacer(1, 6))
-                
+
                 if content:
                     # Escape HTML and convert newlines
                     content_escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     content_escaped = content_escaped.replace("\n", "<br/>")
                     story.append(Paragraph(content_escaped, content_style))
                     story.append(Spacer(1, 12))
-            
+
             # Build PDF
             doc.build(story)
             buffer.seek(0)
-            
+
             filename = f"{safe_company_name}_Vorhabensbeschreibung.pdf"
             return Response(
                 content=buffer.getvalue(),
@@ -2468,35 +2838,34 @@ def export_document(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="PDF export requires reportlab library. Install with: pip install reportlab"
-            )
+            ) from None
         except Exception as e:
             logger.error(f"PDF export error for document {document_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to generate PDF: {str(e)}"
-            )
-    
+            ) from e
+
     elif format.lower() == "docx" or format.lower() == "doc":
         try:
             from docx import Document as DocxDocument
-            from docx.shared import Pt, Inches
-            from docx.enum.text import WD_ALIGN_PARAGRAPH
-            
+            from docx.shared import Pt
+
             # Create DOCX document
             docx = DocxDocument()
-            
+
             # Add sections to DOCX
             for section in sections:
                 title = section.get("title", "")
                 content = section.get("content", "")
-                
+
                 if title:
                     title_para = docx.add_paragraph(title)
                     title_para.style = 'Heading 1'
                     title_run = title_para.runs[0] if title_para.runs else title_para.add_run(title)
                     title_run.font.size = Pt(14)
                     title_run.bold = True
-                
+
                 if content:
                     content_para = docx.add_paragraph(content)
                     content_para.style = 'Normal'
@@ -2504,12 +2873,12 @@ def export_document(
                         run.font.size = Pt(11)
                     # Add spacing after content
                     docx.add_paragraph()
-            
+
             # Save to buffer
             buffer = io.BytesIO()
             docx.save(buffer)
             buffer.seek(0)
-            
+
             filename = f"{safe_company_name}_Vorhabensbeschreibung.docx"
             return Response(
                 content=buffer.getvalue(),
@@ -2522,14 +2891,14 @@ def export_document(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="DOCX export requires python-docx library. Install with: pip install python-docx"
-            )
+            ) from None
         except Exception as e:
             logger.error(f"DOCX export error for document {document_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to generate DOCX: {str(e)}"
-            )
-    
+            ) from e
+
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

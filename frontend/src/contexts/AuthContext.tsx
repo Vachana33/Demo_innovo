@@ -7,7 +7,7 @@
  * - Token expiration is checked on each API call
  * - Auth state is checked on app initialization
  */
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 
 interface AuthContextType {
   token: string | null;
@@ -20,20 +20,18 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const TOKEN_STORAGE_KEY = "innovo_auth_token";
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(null);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+// Initialize state from localStorage (runs once on module load)
+const getInitialToken = (): string | null => {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(TOKEN_STORAGE_KEY);
+};
 
-  // Load token from localStorage on mount
-  useEffect(() => {
-    const storedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
-    if (storedToken) {
-      // Verify token is not expired (basic check)
-      // Full validation happens on backend
-      setToken(storedToken);
-      setIsAuthenticated(true);
-    }
-  }, []);
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [token, setToken] = useState<string | null>(getInitialToken);
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    const storedToken = getInitialToken();
+    return storedToken !== null;
+  });
 
   const login = (newToken: string) => {
     // Store token in localStorage
@@ -57,6 +55,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   const context = useContext(AuthContext);
   if (context === undefined) {

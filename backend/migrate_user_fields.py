@@ -20,7 +20,7 @@ def migrate_user_table():
             # Check if columns exist by querying table info
             result = conn.execute(text("PRAGMA table_info(users)"))
             columns = [row[1] for row in result]
-            
+
             # Add reset_token_hash if missing
             if 'reset_token_hash' not in columns:
                 logger.info("Adding reset_token_hash column...")
@@ -28,7 +28,7 @@ def migrate_user_table():
                 logger.info("Added reset_token_hash column")
             else:
                 logger.info("reset_token_hash column already exists")
-            
+
             # Add reset_token_expiry if missing
             if 'reset_token_expiry' not in columns:
                 logger.info("Adding reset_token_expiry column...")
@@ -36,9 +36,9 @@ def migrate_user_table():
                 logger.info("Added reset_token_expiry column")
             else:
                 logger.info("reset_token_expiry column already exists")
-            
+
             logger.info("Migration completed successfully!")
-            
+
         except Exception as e:
             logger.error(f"Migration failed: {str(e)}")
             raise

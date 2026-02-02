@@ -20,7 +20,7 @@ def migrate_company_table():
             # Check if columns exist by querying table info
             result = conn.execute(text("PRAGMA table_info(companies)"))
             columns = [row[1] for row in result]
-            
+
             # Add website_text if missing
             if 'website_text' not in columns:
                 logger.info("Adding website_text column...")
@@ -28,7 +28,7 @@ def migrate_company_table():
                 logger.info("Added website_text column")
             else:
                 logger.info("website_text column already exists")
-            
+
             # Add transcript_text if missing
             if 'transcript_text' not in columns:
                 logger.info("Adding transcript_text column...")
@@ -36,7 +36,7 @@ def migrate_company_table():
                 logger.info("Added transcript_text column")
             else:
                 logger.info("transcript_text column already exists")
-            
+
             # Add processing_status if missing
             if 'processing_status' not in columns:
                 logger.info("Adding processing_status column...")
@@ -48,7 +48,7 @@ def migrate_company_table():
                 logger.info("Added processing_status column")
             else:
                 logger.info("processing_status column already exists")
-            
+
             # Add processing_error if missing
             if 'processing_error' not in columns:
                 logger.info("Adding processing_error column...")
@@ -56,9 +56,9 @@ def migrate_company_table():
                 logger.info("Added processing_error column")
             else:
                 logger.info("processing_error column already exists")
-            
+
             logger.info("Migration completed successfully!")
-            
+
         except Exception as e:
             logger.error(f"Migration failed: {str(e)}")
             raise

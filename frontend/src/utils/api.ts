@@ -34,7 +34,7 @@ function getAuthToken(): string | null {
  * @param options - Fetch options (method, body, etc.)
  * @returns Promise with response data
  */
-export async function apiRequest<T = any>(
+export async function apiRequest<T = unknown>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
@@ -70,30 +70,57 @@ export async function apiRequest<T = any>(
     throw new Error("Authentication required. Please log in again.");
   }
 
-  // Parse response
-  const data = await response.json();
+  // Handle 204 No Content - no body to parse
+  if (response.status === 204) {
+    if (!response.ok) {
+      throw new Error("Request failed");
+    }
+    return null as T;
+  }
+
+  // Check if response has content before parsing JSON
+  const contentType = response.headers.get("content-type");
+  const hasContent = contentType && contentType.includes("application/json");
+  
+  let data: unknown = null;
+  if (hasContent) {
+    // Parse response only if it has JSON content
+    const text = await response.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // If JSON parsing fails, use the text as error message
+        if (!response.ok) {
+          throw new Error(text || "Request failed");
+        }
+        return text as T;
+      }
+    }
+  }
 
   // Throw error if request failed
   if (!response.ok) {
-    throw new Error(data.detail || data.message || "Request failed");
+    const errorData = data as { detail?: string; message?: string };
+    throw new Error(errorData?.detail || errorData?.message || "Request failed");
   }
 
-  return data;
+  return data as T;
 }
 
 /**
  * Make an authenticated GET request.
  */
-export async function apiGet<T = any>(endpoint: string): Promise<T> {
+export async function apiGet<T = unknown>(endpoint: string): Promise<T> {
   return apiRequest<T>(endpoint, { method: "GET" });
 }
 
 /**
  * Make an authenticated POST request.
  */
-export async function apiPost<T = any>(
+export async function apiPost<T = unknown>(
   endpoint: string,
-  body?: any
+  body?: unknown
 ): Promise<T> {
   return apiRequest<T>(endpoint, {
     method: "POST",
@@ -104,9 +131,9 @@ export async function apiPost<T = any>(
 /**
  * Make an authenticated PUT request.
  */
-export async function apiPut<T = any>(
+export async function apiPut<T = unknown>(
   endpoint: string,
-  body?: any
+  body?: unknown
 ): Promise<T> {
   return apiRequest<T>(endpoint, {
     method: "PUT",
@@ -117,7 +144,7 @@ export async function apiPut<T = any>(
 /**
  * Make an authenticated DELETE request.
  */
-export async function apiDelete<T = any>(endpoint: string): Promise<T> {
+export async function apiDelete<T = unknown>(endpoint: string): Promise<T> {
   return apiRequest<T>(endpoint, { method: "DELETE" });
 }
 
@@ -128,7 +155,7 @@ export async function apiUploadFile(
   endpoint: string,
   file: File,
   additionalData?: Record<string, string>
-): Promise<any> {
+): Promise<Record<string, unknown>> {
   const token = getAuthToken();
   const formData = new FormData();
   formData.append("file", file);

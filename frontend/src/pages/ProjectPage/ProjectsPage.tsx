@@ -8,6 +8,14 @@ type FundingProgram = {
   id: number;
   title: string;
   website?: string;
+  template_name?: string; // Legacy field
+  template_source?: "system" | "user";
+  template_ref?: string;
+  // Scraped data fields
+  description?: string;
+  sections_json?: Array<Record<string, unknown>>;
+  content_hash?: string;
+  last_scraped_at?: string;
 };
 
 type Company = {
@@ -68,6 +76,7 @@ export default function ProjectsPage() {
   const [deletingCompanyId, setDeletingCompanyId] = useState<number | null>(null);
   const [openProgramMenuId, setOpenProgramMenuId] = useState<number | null>(null);
   const [openCompanyMenuId, setOpenCompanyMenuId] = useState<number | null>(null);
+  const [scrapingProgramId, setScrapingProgramId] = useState<number | null>(null);
   
   // Import dialog state
   const [allCompanies, setAllCompanies] = useState<Company[]>([]);
@@ -82,11 +91,18 @@ export default function ProjectsPage() {
   // Form fields
   const [programTitle, setProgramTitle] = useState("");
   const [programWebsite, setProgramWebsite] = useState("");
+  const [programTemplate, setProgramTemplate] = useState<string>("");
+  const [programTemplateSource, setProgramTemplateSource] = useState<"system" | "user" | "">("");
+  const [availableTemplates, setAvailableTemplates] = useState<{
+    system: Array<{ id: string; name: string; source: string }>;
+    user: Array<{ id: string; name: string; source: string; description?: string }>;
+  }>({ system: [], user: [] });
   const [companyName, setCompanyName] = useState("");
   const [companyWebsite, setCompanyWebsite] = useState("");
   const [companyAudio, setCompanyAudio] = useState<File | null>(null);
-  // @ts-ignore - companyDocs is set but not currently read (reserved for future use)
-  const [companyDocs, setCompanyDocs] = useState<FileList | null>(null);
+  // Reserved for future use - companyDocs is set but not currently read
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_companyDocs, setCompanyDocs] = useState<FileList | null>(null);
   const [isCreatingProgram, setIsCreatingProgram] = useState(false);
 
   // Search functionality - client-side filtering
@@ -120,9 +136,9 @@ export default function ProjectsPage() {
         setIsLoadingPrograms(true);
         const data = await apiGet<FundingProgram[]>("/funding-programs");
         setPrograms(data);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Error fetching funding programs:", error);
-        if (error.message.includes("Authentication required")) {
+        if (error instanceof Error && error.message.includes("Authentication required")) {
           logout();
         }
       } finally {
@@ -131,6 +147,30 @@ export default function ProjectsPage() {
     }
     fetchPrograms();
   }, [logout]);
+
+  // Fetch available templates when dialog opens
+  useEffect(() => {
+    if (showProgramDialog) {
+      fetchAvailableTemplates();
+    } else {
+      // Reset templates when dialog closes
+      setAvailableTemplates({ system: [], user: [] });
+    }
+  }, [showProgramDialog]);
+
+  async function fetchAvailableTemplates() {
+    try {
+      const templates = await apiGet<{
+        system: Array<{ id: string; name: string; source: string }>;
+        user: Array<{ id: string; name: string; source: string; description?: string }>;
+      }>("/templates/list");
+      setAvailableTemplates(templates);
+    } catch (error: unknown) {
+      console.error("Error fetching templates:", error);
+      // Don't show error to user, just use empty list
+      setAvailableTemplates({ system: [], user: [] });
+    }
+  }
 
   // Fetch companies when a funding program is selected
   // ONLY uses GET /funding-programs/{id}/companies
@@ -154,10 +194,10 @@ export default function ProjectsPage() {
         setCompanies(data);
         // Clear selected company when switching programs
         setSelectedCompanyId(null);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Error fetching companies:", error);
         setCompanies([]);
-        if (error.message.includes("Authentication required")) {
+        if (error instanceof Error && error.message.includes("Authentication required")) {
           logout();
         }
       } finally {
@@ -172,8 +212,8 @@ export default function ProjectsPage() {
     if (!selectedProgramId || !selectedCompanyId) return;
     const company = companies.find((c) => c.id === selectedCompanyId);
     if (!company) return;
-    // Use company ID instead of name for cleaner routing
-    navigate(`/editor/${selectedCompanyId}/${docType}`);
+    // Use company ID and pass funding_program_id as query parameter
+    navigate(`/editor/${selectedCompanyId}/${docType}?funding_program_id=${selectedProgramId}`);
   }
 
   // Create a new funding program
@@ -184,9 +224,24 @@ export default function ProjectsPage() {
     setIsCreatingProgram(true);
 
     try {
+      // Determine template_source and template_ref based on selection
+      let templateSource: "system" | "user" | undefined = undefined;
+      let templateRef: string | undefined = undefined;
+
+      if (programTemplateSource === "system" && programTemplate) {
+        templateSource = "system";
+        templateRef = programTemplate;
+      } else if (programTemplateSource === "user" && programTemplate) {
+        templateSource = "user";
+        templateRef = programTemplate;
+      }
+
       const createdProgram = await apiPost<FundingProgram>("/funding-programs", {
         title: programTitle.trim(),
         website: programWebsite.trim() || undefined,
+        template_source: templateSource,
+        template_ref: templateRef,
+        template_name: programTemplate || undefined, // Legacy field for backward compatibility
       });
 
       // Update state with the new program from backend
@@ -198,11 +253,14 @@ export default function ProjectsPage() {
       // Clear form and close dialog
       setProgramTitle("");
       setProgramWebsite("");
+      setProgramTemplate("");
+      setProgramTemplateSource("");
       setShowProgramDialog(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error creating funding program:", error);
-      alert(error.message || "Failed to create funding program. Please try again.");
-      if (error.message.includes("Authentication required")) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to create funding program. Please try again.";
+      alert(errorMsg);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
@@ -218,11 +276,26 @@ export default function ProjectsPage() {
     setIsUpdatingProgram(true);
 
     try {
+      // Determine template_source and template_ref based on selection
+      let templateSource: "system" | "user" | undefined = undefined;
+      let templateRef: string | undefined = undefined;
+      
+      if (programTemplateSource === "system" && programTemplate) {
+        templateSource = "system";
+        templateRef = programTemplate;
+      } else if (programTemplateSource === "user" && programTemplate) {
+        templateSource = "user";
+        templateRef = programTemplate;
+      }
+      
       const updatedProgram = await apiPut<FundingProgram>(
         `/funding-programs/${editingProgramId}`,
         {
           title: programTitle.trim(),
           website: programWebsite.trim() || undefined,
+          template_source: templateSource,
+          template_ref: templateRef,
+          template_name: programTemplate || undefined, // Legacy field for backward compatibility
         }
       );
 
@@ -243,12 +316,15 @@ export default function ProjectsPage() {
       // Clear form and close dialog
       setProgramTitle("");
       setProgramWebsite("");
+      setProgramTemplate("");
+      setProgramTemplateSource("");
       setEditingProgramId(null);
       setShowProgramDialog(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error updating funding program:", error);
-      alert(error.message || "Failed to update funding program. Please try again.");
-      if (error.message.includes("Authentication required")) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to update funding program. Please try again.";
+      alert(errorMsg);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
@@ -277,14 +353,48 @@ export default function ProjectsPage() {
 
       // Close confirmation dialog
       setDeletingProgramId(null);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error deleting funding program:", error);
-      alert(error.message || "Failed to delete funding program. Please try again.");
-      if (error.message.includes("Authentication required")) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to delete funding program. Please try again.";
+      alert(errorMsg);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
       setIsDeletingProgram(false);
+    }
+  }
+
+  // Refresh funding program data (only if content changed)
+  async function handleRefreshProgram(programId: number) {
+    try {
+      setScrapingProgramId(programId);
+      const updated = await apiPost<FundingProgram>(
+        `/funding-programs/${programId}/refresh`
+      );
+
+      // Refresh the programs list
+      const data = await apiGet<FundingProgram[]>("/funding-programs");
+      setPrograms(data);
+
+      // Check if content changed
+      const program = programs.find(p => p.id === programId);
+      if (program?.content_hash === updated.content_hash) {
+        alert("No changes detected. Website content is up to date.");
+      } else {
+        const sectionsCount = updated.sections_json?.length || 0;
+        alert(`Data refreshed! Found ${sectionsCount} section${sectionsCount !== 1 ? 's' : ''}.`);
+      }
+    } catch (error: unknown) {
+      console.error("Error refreshing program:", error);
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      alert(`Refresh failed: ${errorMsg}`);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
+        logout();
+      }
+    } finally {
+      setScrapingProgramId(null);
+      setOpenProgramMenuId(null);
     }
   }
 
@@ -299,7 +409,7 @@ export default function ProjectsPage() {
       // First, upload audio file if provided
       let audioPath: string | undefined = undefined;
       if (companyAudio) {
-        const uploadData = await apiUploadFile("/upload-audio", companyAudio);
+        const uploadData = await apiUploadFile("/upload-audio", companyAudio) as { audio_path?: string };
         audioPath = uploadData.audio_path;
       }
 
@@ -326,10 +436,11 @@ export default function ProjectsPage() {
       setCompanyDocs(null);
       setShowCompanyDialog(false);
       setShowCompanyMenu(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error creating company:", error);
-      alert(error.message || "Failed to create company. Please try again.");
-      if (error.message.includes("Authentication required")) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to create company. Please try again.";
+      alert(errorMsg);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
@@ -346,10 +457,10 @@ export default function ProjectsPage() {
         setIsLoadingAllCompanies(true);
         const data = await apiGet<Company[]>("/companies");
         setAllCompanies(data);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("Error fetching all companies:", error);
         setAllCompanies([]);
-        if (error.message.includes("Authentication required")) {
+        if (error instanceof Error && error.message.includes("Authentication required")) {
           logout();
         }
       } finally {
@@ -385,10 +496,11 @@ export default function ProjectsPage() {
       // Close import dialog
       setShowImportDialog(false);
       setShowCompanyMenu(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error importing company:", error);
-      alert(error.message || "Failed to import company. Please try again.");
-      if (error.message.includes("Authentication required")) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to import company. Please try again.";
+      alert(errorMsg);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
@@ -407,7 +519,7 @@ export default function ProjectsPage() {
       // First, upload audio file if provided
       let audioPath: string | undefined = undefined;
       if (companyAudio) {
-        const uploadData = await apiUploadFile("/upload-audio", companyAudio);
+        const uploadData = await apiUploadFile("/upload-audio", companyAudio) as { audio_path?: string };
         audioPath = uploadData.audio_path;
       }
 
@@ -438,10 +550,11 @@ export default function ProjectsPage() {
       setCompanyDocs(null);
       setEditingCompanyId(null);
       setShowCompanyDialog(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error updating company:", error);
-      alert(error.message || "Failed to update company. Please try again.");
-      if (error.message.includes("Authentication required")) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to update company. Please try again.";
+      alert(errorMsg);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
@@ -468,10 +581,11 @@ export default function ProjectsPage() {
 
       // Close confirmation dialog
       setDeletingCompanyId(null);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Error deleting company:", error);
-      alert(error.message || "Failed to delete company. Please try again.");
-      if (error.message.includes("Authentication required")) {
+      const errorMsg = error instanceof Error ? error.message : "Failed to delete company. Please try again.";
+      alert(errorMsg);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
         logout();
       }
     } finally {
@@ -626,6 +740,11 @@ export default function ProjectsPage() {
                               {p.website}
                             </div>
                           )}
+                          {p.last_scraped_at && (
+                            <div style={{ fontSize: "0.75rem", color: "#666", marginTop: "0.25rem" }}>
+                              Last scraped: {new Date(p.last_scraped_at).toLocaleString()}
+                            </div>
+                          )}
                         </div>
                         <div className={styles.menuContainer}>
                           <button
@@ -645,6 +764,18 @@ export default function ProjectsPage() {
                                   setEditingProgramId(p.id);
                                   setProgramTitle(p.title);
                                   setProgramWebsite(p.website || "");
+                                  // Determine template source from existing program
+                                  if (p.template_source && p.template_ref) {
+                                    setProgramTemplateSource(p.template_source);
+                                    setProgramTemplate(p.template_ref);
+                                  } else if (p.template_name) {
+                                    // Legacy: assume system template if only template_name exists
+                                    setProgramTemplateSource("system");
+                                    setProgramTemplate(p.template_name);
+                                  } else {
+                                    setProgramTemplateSource("");
+                                    setProgramTemplate("");
+                                  }
                                   setShowProgramDialog(true);
                                   setOpenProgramMenuId(null);
                                 }}
@@ -652,6 +783,18 @@ export default function ProjectsPage() {
                               >
                                 Edit
                               </button>
+                              {p.website && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRefreshProgram(p.id);
+                                  }}
+                                  className={styles.menuItem}
+                                  disabled={scrapingProgramId === p.id}
+                                >
+                                  {scrapingProgramId === p.id ? "Refreshing..." : "Refresh Data"}
+                                </button>
+                              )}
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -975,6 +1118,7 @@ export default function ProjectsPage() {
             setEditingProgramId(null);
             setProgramTitle("");
             setProgramWebsite("");
+            setProgramTemplate("");
           }}
         >
           <div
@@ -1001,6 +1145,61 @@ export default function ProjectsPage() {
                 placeholder="https://…"
                 className={styles.formInput}
               />
+              <label className={styles.formLabel}>Document Template (optional)</label>
+              <div style={{ marginBottom: "0.5rem" }}>
+                <select
+                  value={programTemplateSource}
+                  onChange={(e) => {
+                    setProgramTemplateSource(e.target.value as "system" | "user" | "");
+                    setProgramTemplate(""); // Reset template selection when source changes
+                  }}
+                  className={styles.formInput}
+                  style={{ marginBottom: "0.5rem" }}
+                >
+                  <option value="">No template</option>
+                  <option value="system">System Template</option>
+                  <option value="user">User Template</option>
+                </select>
+              </div>
+              {programTemplateSource && (
+                <select
+                  value={programTemplate}
+                  onChange={(e) => setProgramTemplate(e.target.value)}
+                  className={styles.formInput}
+                >
+                  <option value="">Select a template...</option>
+                  {programTemplateSource === "system" && availableTemplates.system.length > 0 ? (
+                    availableTemplates.system.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))
+                  ) : programTemplateSource === "system" ? (
+                    <option value="" disabled>No system templates available</option>
+                  ) : null}
+                  {programTemplateSource === "user" && availableTemplates.user.length > 0 ? (
+                    availableTemplates.user.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} {t.description ? `- ${t.description}` : ""}
+                      </option>
+                    ))
+                  ) : programTemplateSource === "user" ? (
+                    <option value="" disabled>No user templates available</option>
+                  ) : null}
+                </select>
+              )}
+              <div style={{ marginTop: "0.5rem", fontSize: "0.85rem", color: "#6b7280" }}>
+                <a
+                  href="/templates/new"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    navigate("/templates/new");
+                  }}
+                  style={{ color: "var(--brand-primary, #2563eb)", textDecoration: "underline" }}
+                >
+                  Create new template
+                </a>
+              </div>
               <div className={styles.dialogActions}>
                 <button
                   type="button"
@@ -1009,14 +1208,15 @@ export default function ProjectsPage() {
                     setEditingProgramId(null);
                     setProgramTitle("");
                     setProgramWebsite("");
+                    setProgramTemplate("");
                   }}
                   className={styles.cancelButton}
                   disabled={isCreatingProgram || isUpdatingProgram}
                 >
                   Cancel
                 </button>
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   className={styles.createButton}
                   disabled={isCreatingProgram || isUpdatingProgram}
                 >
@@ -1142,8 +1342,8 @@ export default function ProjectsPage() {
                 >
                   Cancel
                 </button>
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   className={styles.createButton}
                   disabled={isCreatingCompany || isUpdatingCompany}
                 >

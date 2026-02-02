@@ -1,22 +1,39 @@
-from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
-from alembic import context
-
+# Standard library imports
 import os
 import sys
+from logging.config import fileConfig
 from pathlib import Path
+
+# Third-party imports
+from sqlalchemy import engine_from_config, pool
+from alembic import context
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    # Load .env file from backend directory
+    backend_dir = Path(__file__).resolve().parent.parent
+    env_path = backend_dir / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    # python-dotenv not installed, skip
+    pass
 
 # Add the backend directory to the path so we can import app modules
 backend_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(backend_dir))
 
-# Import the Base and all models
-from app.database import Base
+# Application imports
+# Note: These imports are after path setup to ensure app modules can be imported
+from app.database import Base  # noqa: E402
 # Import all models so Alembic can detect them for autogenerate
-from app.models import User, FundingProgram, Company, Document, funding_program_companies
+# Note: These imports appear unused but are required for Alembic autogenerate
+from app.models import (  # noqa: F401, E402
+    User, FundingProgram, Company, Document, funding_program_companies,
+    File, AudioTranscriptCache, WebsiteTextCache, DocumentTextCache,
+    FundingProgramDocument, UserTemplate
+)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -81,11 +98,11 @@ def run_migrations_online() -> None:
     """
     # Get database URL from environment
     database_url = get_url()
-    
+
     # Configure Alembic with the database URL
     configuration = config.get_section(config.config_ini_section)
     configuration["sqlalchemy.url"] = database_url
-    
+
     # Set up connect_args based on database type
     connect_args = {}
     if "sqlite" in database_url:
@@ -97,7 +114,7 @@ def run_migrations_online() -> None:
         # Add SSL mode if not already in URL (required for Render Postgres)
         if "sslmode" not in database_url.lower():
             connect_args["sslmode"] = "require"
-    
+
     # Create engine with appropriate settings
     connectable = engine_from_config(
         configuration,

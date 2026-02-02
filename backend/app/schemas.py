@@ -1,5 +1,6 @@
-from pydantic import BaseModel, EmailStr, field_validator
-from typing import Optional
+from enum import Enum
+from pydantic import BaseModel, field_validator
+from typing import Optional, List
 from datetime import datetime
 
 class UserCreate(BaseModel):
@@ -60,11 +61,17 @@ class PasswordReset(BaseModel):
 class FundingProgramCreate(BaseModel):
     title: str
     website: Optional[str] = None
+    template_name: Optional[str] = None  # Legacy
+    template_source: Optional[str] = None  # "system" | "user"
+    template_ref: Optional[str] = None  # System template name or user template UUID
 
 class FundingProgramResponse(BaseModel):
     id: int
     title: str
     website: Optional[str] = None
+    template_name: Optional[str] = None  # Legacy
+    template_source: Optional[str] = None
+    template_ref: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -91,10 +98,15 @@ class CompanyResponse(BaseModel):
         from_attributes = True
 
 # Document Schemas
+class SectionType(str, Enum):
+    TEXT = "text"
+    MILESTONE_TABLE = "milestone_table"
+
 class DocumentSection(BaseModel):
     id: str
     title: str
     content: str
+    type: Optional[SectionType] = None  # Optional for backward compatibility
 
 class DocumentContent(BaseModel):
     sections: list[DocumentSection]
@@ -105,6 +117,7 @@ class DocumentResponse(BaseModel):
     type: str
     content_json: dict
     chat_history: Optional[list[dict]] = None  # Chat messages history
+    headings_confirmed: bool = False  # Phase 2.6: Headings confirmation flag
     updated_at: datetime
 
     class Config:
@@ -130,3 +143,44 @@ class ChatConfirmationRequest(BaseModel):
     section_id: str
     confirmed_content: str  # The content user approved
 
+# UserTemplate Schemas
+class UserTemplateCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    sections: list[dict]  # Same structure as Document.content_json. sections
+
+class UserTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    sections: Optional[list[dict]] = None
+
+class UserTemplateResponse(BaseModel):
+    id: str  # UUID as string
+    name: str
+    description: Optional[str] = None
+    template_structure: dict  # Contains "sections" key
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Funding Program Document Schemas
+class FundingProgramDocumentResponse(BaseModel):
+    id: str  # UUID as string
+    funding_program_id: int
+    file_id: str  # UUID as string
+    category: str
+    original_filename: str
+    display_name: Optional[str] = None
+    uploaded_at: datetime
+    file_type: str
+    file_size: int
+    has_extracted_text: bool
+
+    class Config:
+        from_attributes = True
+
+class FundingProgramDocumentListResponse(BaseModel):
+    documents: List[FundingProgramDocumentResponse]
+    categories: dict[str, int]  # Category name -> count

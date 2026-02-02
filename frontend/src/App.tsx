@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage/LoginPage";
 import ProjectsPage from "./pages/ProjectPage/ProjectsPage";
 import EditorPage from "./pages/EditorPage/EditorPage";
+import TemplateEditorPage from "./pages/TemplateEditorPage/TemplateEditorPage";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 function App() {
@@ -24,6 +25,22 @@ function App() {
         element={
           <ProtectedRoute>
             <EditorPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/templates/new"
+        element={
+          <ProtectedRoute>
+            <TemplateEditorPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/templates/:id/edit"
+        element={
+          <ProtectedRoute>
+            <TemplateEditorPage />
           </ProtectedRoute>
         }
       />
