@@ -85,9 +85,23 @@ def downgrade() -> None:
         # Table doesn't exist, skip
         return
 
-    # Drop indexes and constraints first
-    op.drop_index('ix_files_content_hash', table_name='files')
-    op.drop_constraint('uq_files_content_hash', 'files', type_='unique')
+    # Check database dialect
+    is_sqlite = bind.dialect.name == 'sqlite'
+
+    # Drop indexes first
+    try:
+        op.drop_index('ix_files_content_hash', table_name='files')
+    except Exception:
+        # Index might not exist, continue
+        pass
+
+    # Drop unique constraint only for PostgreSQL (SQLite uses inline unique constraint)
+    if not is_sqlite:
+        try:
+            op.drop_constraint('uq_files_content_hash', 'files', type_='unique')
+        except Exception:
+            # Constraint might not exist, continue
+            pass
 
     # Drop table
     op.drop_table('files')

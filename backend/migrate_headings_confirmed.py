@@ -47,8 +47,9 @@ def migrate_documents_table():
                 exists = result.fetchone() is not None
                 
                 if not exists:
-                    logger.info("Adding headings_confirmed column (PostgreSQL BOOLEAN)...")
-                    conn.execute(text("ALTER TABLE documents ADD COLUMN headings_confirmed BOOLEAN NOT NULL DEFAULT false"))
+                    # Use INTEGER for cross-database compatibility (matches model definition)
+                    logger.info("Adding headings_confirmed column (PostgreSQL INTEGER)...")
+                    conn.execute(text("ALTER TABLE documents ADD COLUMN headings_confirmed INTEGER NOT NULL DEFAULT 0"))
                     logger.info("Added headings_confirmed column")
                 else:
                     logger.info("headings_confirmed column already exists")

@@ -1,5 +1,6 @@
-# Use Python 3.9 slim image for smaller size
-FROM python:3.9-slim
+# Use Python 3.10 slim image for smaller size
+# Upgraded from 3.9 to 3.10 because python-multipart>=0.0.22 requires Python >=3.10
+FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app

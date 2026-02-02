@@ -128,6 +128,8 @@ class File(Base):
     storage_path = Column(Text, nullable=False)  # Path in Supabase Storage
     size_bytes = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 # Phase 2: Raw Processing Cache Tables
 
 class AudioTranscriptCache(Base):

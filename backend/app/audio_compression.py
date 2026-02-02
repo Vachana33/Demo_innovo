@@ -43,12 +43,16 @@ def compress_audio(file_bytes: bytes, input_format: str = "m4a") -> Optional[byt
     if not file_bytes:
         return None
     
-    # Create temporary files for input and output
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{input_format}") as input_file:
-        input_path = input_file.name
-        input_file.write(file_bytes)
+    # Initialize paths to None to ensure they're defined in finally block
+    input_path = None
+    output_path = None
     
+    # Create temporary files for input and output
     try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{input_format}") as input_file:
+            input_path = input_file.name
+            input_file.write(file_bytes)
+        
         # Create temporary output file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as output_file:
             output_path = output_file.name
@@ -77,6 +81,7 @@ def compress_audio(file_bytes: bytes, input_format: str = "m4a") -> Optional[byt
             logger.error(f"Audio compression failed: {result.stderr}")
             return None
         
+        
         # Read compressed file
         with open(output_path, "rb") as f:
             compressed_bytes = f.read()
@@ -96,10 +101,11 @@ def compress_audio(file_bytes: bytes, input_format: str = "m4a") -> Optional[byt
         return None
     finally:
         # Clean up temporary files
+        # Check if paths are defined before attempting cleanup
         try:
-            if os.path.exists(input_path):
+            if input_path and os.path.exists(input_path):
                 os.unlink(input_path)
-            if os.path.exists(output_path):
+            if output_path and os.path.exists(output_path):
                 os.unlink(output_path)
         except Exception as e:
             logger.warning(f"Failed to clean up temp files: {str(e)}")

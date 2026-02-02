@@ -264,7 +264,7 @@ def get_or_create_file(
 
     # Create file record
     new_file = File(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         content_hash=content_hash,
         file_type=file_type,
         storage_path=storage_path,
@@ -289,7 +289,13 @@ def get_file_by_id(db: Session, file_id: str) -> Optional[File]:
     Returns:
         File object or None if not found
     """
-    return db.query(File).filter(File.id == file_id).first()
+    # Convert string to UUID object for proper type matching with UUID(as_uuid=True)
+    try:
+        file_uuid = uuid.UUID(file_id) if isinstance(file_id, str) else file_id
+    except (ValueError, AttributeError):
+        # Invalid UUID format
+        return None
+    return db.query(File).filter(File.id == file_uuid).first()
 
 
 def download_from_supabase_storage(storage_path: str) -> Optional[bytes]:

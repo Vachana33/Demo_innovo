@@ -166,8 +166,9 @@ def process_company_background(company_id: int, website: str = None, audio_path:
     """
     from app.database import SessionLocal
 
-    db = SessionLocal()
+    db = None
     try:
+        db = SessionLocal()
         # Log preprocessing start
         logger.info(f"Starting preprocessing for company_id={company_id}")
 
@@ -316,16 +317,25 @@ def process_company_background(company_id: int, website: str = None, audio_path:
 
     except Exception as e:
         logger.error(f"Preprocessing failed for company_id={company_id}: {str(e)}")
-        try:
-            company = db.query(Company).filter(Company.id == company_id).first()
-            if company:
-                company.processing_status = "failed"
-                company.processing_error = f"Background processing error: {str(e)}"
-                db.commit()
-        except Exception as commit_error:
-            logger.error(f"Failed to update error status for company_id={company_id}: {str(commit_error)}")
+        # Only attempt to update error status if database session is available
+        if db is not None:
+            try:
+                company = db.query(Company).filter(Company.id == company_id).first()
+                if company:
+                    company.processing_status = "failed"
+                    company.processing_error = f"Background processing error: {str(e)}"
+                    db.commit()
+            except Exception as commit_error:
+                logger.error(f"Failed to update error status for company_id={company_id}: {str(commit_error)}")
+        else:
+            logger.error(f"Cannot update error status for company_id={company_id}: database session not available")
     finally:
-        db.close()
+        # Ensure database session is always closed to prevent connection leaks
+        if db is not None:
+            try:
+                db.close()
+            except Exception as close_error:
+                logger.error(f"Failed to close database session for company_id={company_id}: {str(close_error)}")
 
 
 @router.post(

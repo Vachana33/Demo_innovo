@@ -111,7 +111,7 @@ def store_audio_transcript(db: Session, file_content_hash: str, transcript_text:
     """
     try:
         cache_entry = AudioTranscriptCache(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             file_content_hash=file_content_hash,
             transcript_text=transcript_text,
             processed_at=datetime.now(timezone.utc)
@@ -165,7 +165,7 @@ def store_website_text(db: Session, url: str, website_text: str) -> None:
         normalized_url = normalize_url(url)
 
         cache_entry = WebsiteTextCache(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             url_hash=url_hash,
             normalized_url=normalized_url,
             website_text=website_text,
@@ -214,7 +214,7 @@ def store_document_text(db: Session, file_content_hash: str, extracted_text: str
     """
     try:
         cache_entry = DocumentTextCache(
-            id=str(uuid.uuid4()),
+            id=uuid.uuid4(),
             file_content_hash=file_content_hash,
             extracted_text=extracted_text,
             processed_at=datetime.now(timezone.utc)
