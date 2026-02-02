@@ -40,7 +40,8 @@ if not os.getenv("OPENAI_API_KEY"):
 # Note: These imports are after environment setup to ensure .env is loaded first
 from fastapi import FastAPI, Request, status  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
+from fastapi.responses import JSONResponse, FileResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 from app.database import engine, Base  # noqa: E402
@@ -144,9 +145,51 @@ app.include_router(companies.router, tags=["companies"])
 app.include_router(documents.router, tags=["documents"])
 app.include_router(templates.router, tags=["templates"])
 
+# Serve frontend static files if dist directory exists (for production deployment)
+# Frontend dist directory should be copied to backend/static during Docker build
+STATIC_DIR = BASE_DIR / "static"
+
+# Check if static directory exists (copied from frontend/dist during Docker build)
+if STATIC_DIR.exists() and (STATIC_DIR / "index.html").exists():
+    # Mount static files (JS, CSS, images, etc.) - must be before catch-all route
+    if (STATIC_DIR / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+    
+    # Serve other static files (favicon, etc.)
+    @app.get("/vite.svg")
+    async def vite_svg():
+        svg_path = STATIC_DIR / "vite.svg"
+        if svg_path.exists():
+            return FileResponse(svg_path)
+        raise StarletteHTTPException(status_code=404)
+    
+    logger.info(f"Serving frontend static files from {STATIC_DIR}")
+else:
+    # Frontend not available - API-only mode
+    logger.info("Frontend static files not found - running in API-only mode")
+
+# Root route - serve API info or frontend index.html
 @app.get("/")
-def root():
+async def root(request: Request):
+    # If frontend exists, serve it; otherwise return API info
+    if STATIC_DIR.exists() and (STATIC_DIR / "index.html").exists():
+        return FileResponse(STATIC_DIR / "index.html")
     return {"message": "Innovo Agent API"}
+
+# Catch-all route for SPA: serve index.html for all non-API routes
+# This must be LAST to avoid intercepting API routes
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str, request: Request):
+    # Skip if frontend not available
+    if not (STATIC_DIR.exists() and (STATIC_DIR / "index.html").exists()):
+        raise StarletteHTTPException(status_code=404, detail="Not found")
+    
+    # Don't serve index.html for API routes (these should have been handled by routers above)
+    if full_path.startswith(("auth/", "funding-programs", "companies", "documents", "templates", "health", "assets/")):
+        raise StarletteHTTPException(status_code=404, detail="Not found")
+    
+    # Serve index.html for all other routes (SPA routing)
+    return FileResponse(STATIC_DIR / "index.html")
 
 @app.get("/health")
 def health():

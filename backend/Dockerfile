@@ -14,6 +14,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the backend application code
 COPY . .
 
+# Copy frontend static files if they exist (for serving frontend from backend)
+# Frontend should be built and copied to backend/static before Docker build
+# If static directory doesn't exist, backend will run in API-only mode
+# To build: 1) Build frontend: cd frontend && npm run build
+#           2) Copy dist: cp -r frontend/dist backend/static
+#           3) Build Docker: docker build -t innovo-backend ./backend
+
 # Expose port 8000 (default, can be overridden with PORT env var)
 EXPOSE 8000
 
