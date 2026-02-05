@@ -53,3 +53,6 @@ htmlcov/
 backend/uploads/
 frontend/uploads/
 uploads/
+
+# Ignore all Markdown files
+*.md
