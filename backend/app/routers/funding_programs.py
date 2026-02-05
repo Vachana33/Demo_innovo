@@ -106,10 +106,18 @@ def get_funding_programs(
     """
     Get all funding programs owned by the current user.
     """
-    programs = db.query(FundingProgram).filter(
-        FundingProgram.user_email == current_user.email
-    ).order_by(FundingProgram.created_at.desc()).all()
-    return programs
+    try:
+        programs = db.query(FundingProgram).filter(
+            FundingProgram.user_email == current_user.email
+        ).order_by(FundingProgram.created_at.desc()).all()
+        logger.info(f"Retrieved {len(programs)} funding programs for user {current_user.email}")
+        return programs
+    except Exception as e:
+        logger.error(f"Error fetching funding programs for user {current_user.email}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch funding programs: {str(e)}"
+        ) from e
 
 @router.put("/funding-programs/{funding_program_id}", response_model=FundingProgramResponse)
 def update_funding_program(
