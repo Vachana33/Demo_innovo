@@ -168,6 +168,12 @@ else:
     # Frontend not available - API-only mode
     logger.info("Frontend static files not found - running in API-only mode")
 
+# Health check endpoint - must be before catch-all route
+@app.get("/health")
+async def health():
+    """Simple health check endpoint for Render and monitoring services."""
+    return {"status": "ok"}
+
 # Root route - serve API info or frontend index.html
 @app.get("/")
 async def root(request: Request):
@@ -190,8 +196,4 @@ async def serve_spa(full_path: str, request: Request):
     
     # Serve index.html for all other routes (SPA routing)
     return FileResponse(STATIC_DIR / "index.html")
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
 
