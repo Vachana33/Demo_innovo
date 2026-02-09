@@ -27,17 +27,17 @@ def upgrade() -> None:
     - company_profile: JSON field for structured extracted company information
     - extraction_status: String field ("pending" | "extracted" | "failed")
     - extracted_at: DateTime field for extraction timestamp
-    
+
     All fields are nullable for backward compatibility.
     """
     # Check if we're using SQLite (which has limited ALTER TABLE support)
     bind = op.get_bind()
     is_sqlite = bind.dialect.name == 'sqlite'
-    
+
     # Check if columns already exist (in case of partial migration)
     inspector = sa.inspect(bind)
     companies_columns = [col['name'] for col in inspector.get_columns('companies')]
-    
+
     # Add company_profile JSON column
     if 'company_profile' not in companies_columns:
         if is_sqlite:
@@ -46,11 +46,11 @@ def upgrade() -> None:
         else:
             # PostgreSQL and other databases support JSON
             op.add_column('companies', sa.Column('company_profile', sa.JSON(), nullable=True))
-    
+
     # Add extraction_status column
     if 'extraction_status' not in companies_columns:
         op.add_column('companies', sa.Column('extraction_status', sa.String(), nullable=True))
-    
+
     # Add extracted_at timestamp column
     if 'extracted_at' not in companies_columns:
         op.add_column('companies', sa.Column('extracted_at', sa.DateTime(timezone=True), nullable=True))
@@ -64,13 +64,13 @@ def downgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     companies_columns = [col['name'] for col in inspector.get_columns('companies')]
-    
+
     if 'extracted_at' in companies_columns:
         op.drop_column('companies', 'extracted_at')
-    
+
     if 'extraction_status' in companies_columns:
         op.drop_column('companies', 'extraction_status')
-    
+
     if 'company_profile' in companies_columns:
         op.drop_column('companies', 'company_profile')
 

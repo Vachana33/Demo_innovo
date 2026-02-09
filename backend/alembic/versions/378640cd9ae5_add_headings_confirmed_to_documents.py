@@ -10,7 +10,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+
 
 # revision identifiers, used by Alembic.
 revision: str = '378640cd9ae5'
@@ -27,14 +27,11 @@ def upgrade() -> None:
     is_sqlite = bind.dialect.name == 'sqlite'
     inspector = sa.inspect(bind)
     existing_columns = {col['name'] for col in inspector.get_columns('documents')} if 'documents' in inspector.get_table_names() else set()
-    
+
     if 'headings_confirmed' not in existing_columns:
-        if is_sqlite:
-            # SQLite uses INTEGER for boolean (0/1)
-            op.add_column('documents', sa.Column('headings_confirmed', sa.Integer(), nullable=False, server_default='0'))
-        else:
-            # PostgreSQL uses BOOLEAN
-            op.add_column('documents', sa.Column('headings_confirmed', sa.Boolean(), nullable=False, server_default='false'))
+        # Use Integer for cross-database compatibility (0 = False, 1 = True)
+        # This matches the model definition which uses Integer for SQLite and PostgreSQL compatibility
+        op.add_column('documents', sa.Column('headings_confirmed', sa.Integer(), nullable=False, server_default='0'))
 
 
 def downgrade() -> None:
@@ -43,6 +40,6 @@ def downgrade() -> None:
     """
     inspector = sa.inspect(op.get_bind())
     existing_columns = {col['name'] for col in inspector.get_columns('documents')} if 'documents' in inspector.get_table_names() else set()
-    
+
     if 'headings_confirmed' in existing_columns:
         op.drop_column('documents', 'headings_confirmed')

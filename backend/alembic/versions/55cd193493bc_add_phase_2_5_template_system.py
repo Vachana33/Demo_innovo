@@ -25,7 +25,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     """
     Phase 2.5: Add template system support.
-    
+
     1. Add template_source and template_ref columns to funding_programs
     2. Create user_templates table for user-defined templates
     3. Keep template_name for backward compatibility (no migration needed)
@@ -35,16 +35,16 @@ def upgrade() -> None:
     inspector = sa.inspect(bind)
     existing_columns = {col['name'] for col in inspector.get_columns('funding_programs')} if 'funding_programs' in inspector.get_table_names() else set()
     existing_tables = inspector.get_table_names()
-    
+
     # 1. Add template_source and template_ref to funding_programs
     if 'template_source' not in existing_columns:
         op.add_column('funding_programs', sa.Column('template_source', sa.String(), nullable=True))
         op.create_index('ix_funding_programs_template_source', 'funding_programs', ['template_source'])
-    
+
     if 'template_ref' not in existing_columns:
         op.add_column('funding_programs', sa.Column('template_ref', sa.String(), nullable=True))
         op.create_index('ix_funding_programs_template_ref', 'funding_programs', ['template_ref'])
-    
+
     # 2. Create user_templates table
     if 'user_templates' not in existing_tables:
         if is_sqlite:
@@ -85,13 +85,13 @@ def downgrade() -> None:
     inspector = sa.inspect(bind)
     existing_tables = inspector.get_table_names()
     existing_columns = {col['name'] for col in inspector.get_columns('funding_programs')} if 'funding_programs' in existing_tables else set()
-    
+
     # Drop user_templates table
     if 'user_templates' in existing_tables:
         op.drop_index('ix_user_templates_id', table_name='user_templates')
         op.drop_index('ix_user_templates_user_email', table_name='user_templates')
         op.drop_table('user_templates')
-    
+
     # Remove template_source and template_ref columns
     if 'template_ref' in existing_columns:
         op.drop_index('ix_funding_programs_template_ref', table_name='funding_programs')

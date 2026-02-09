@@ -25,28 +25,28 @@ def upgrade() -> None:
     # Check if we're using SQLite (requires batch mode)
     bind = op.get_bind()
     is_sqlite = bind.dialect.name == 'sqlite'
-    
+
     # Check existing columns to avoid duplicates
     from sqlalchemy import inspect
     inspector = inspect(bind)
-    
+
     funding_programs_columns = [col['name'] for col in inspector.get_columns('funding_programs')]
     documents_columns = [col['name'] for col in inspector.get_columns('documents')]
-    
+
     # Add template_name to funding_programs (if not exists)
     if 'template_name' not in funding_programs_columns:
         op.add_column('funding_programs', sa.Column('template_name', sa.String(), nullable=True))
-    
+
     # Add funding_program_id to documents (nullable for legacy documents) (if not exists)
     if 'funding_program_id' not in documents_columns:
         op.add_column('documents', sa.Column('funding_program_id', sa.Integer(), nullable=True))
-    
+
     if is_sqlite:
         # SQLite: Use batch mode for constraints
         with op.batch_alter_table('documents', schema=None) as batch_op:
             # Create index for performance
             batch_op.create_index('ix_documents_funding_program_id', ['funding_program_id'])
-            
+
             # Add UNIQUE constraint (PostgreSQL allows multiple NULLs, so legacy docs won't conflict)
             # Note: SQLite doesn't support foreign keys in batch mode easily, so we skip it
             # The foreign key relationship is enforced at the application level
@@ -64,10 +64,10 @@ def upgrade() -> None:
             ['funding_program_id'],
             ['id']
         )
-        
+
         # Create index for performance
         op.create_index('ix_documents_funding_program_id', 'documents', ['funding_program_id'])
-        
+
         # Add UNIQUE constraint (PostgreSQL allows multiple NULLs, so legacy docs won't conflict)
         op.create_unique_constraint(
             'uq_document_company_program_type',
@@ -80,7 +80,7 @@ def downgrade() -> None:
     # Check if we're using SQLite (requires batch mode)
     bind = op.get_bind()
     is_sqlite = bind.dialect.name == 'sqlite'
-    
+
     if is_sqlite:
         # SQLite: Use batch mode for constraints
         with op.batch_alter_table('documents', schema=None) as batch_op:
@@ -96,7 +96,7 @@ def downgrade() -> None:
         op.drop_index('ix_documents_funding_program_id', table_name='documents')
         # Remove foreign key
         op.drop_constraint('fk_documents_funding_program', 'documents', type_='foreignkey')
-    
+
     # Remove columns
     op.drop_column('documents', 'funding_program_id')
     op.drop_column('funding_programs', 'template_name')
