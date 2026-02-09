@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+
 import { useAuth } from "../../contexts/AuthContext";
 import { apiGet, apiPost, apiPut, apiDelete } from "../../utils/api";
 import styles from "./FundingProgramsPage.module.css";
@@ -19,7 +19,7 @@ type FundingProgram = {
 };
 
 export default function FundingProgramsPage() {
-  const navigate = useNavigate();
+
   const { logout } = useAuth();
   const [programs, setPrograms] = useState<FundingProgram[]>([]);
   const [isLoading, setIsLoading] = useState(true);

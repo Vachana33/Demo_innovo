@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
-import { apiGet, apiPost } from "../../utils/api";
+import { apiGet } from "../../utils/api";
 import styles from "./DocumentsPage.module.css";
 
 type Company = {
