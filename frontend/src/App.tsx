@@ -1,9 +1,14 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage/LoginPage";
-import ProjectsPage from "./pages/ProjectPage/ProjectsPage";
+import DashboardPage from "./pages/DashboardPage/DashboardPage";
+import FundingProgramsPage from "./pages/FundingProgramsPage/FundingProgramsPage";
+import CompaniesPage from "./pages/CompaniesPage/CompaniesPage";
+import DocumentsPage from "./pages/DocumentsPage/DocumentsPage";
+import TemplatesPage from "./pages/TemplatesPage/TemplatesPage";
 import EditorPage from "./pages/EditorPage/EditorPage";
 import TemplateEditorPage from "./pages/TemplateEditorPage/TemplateEditorPage";
 import ProtectedRoute from "./components/ProtectedRoute";
+import Layout from "./components/Layout/Layout";
 
 function App() {
   return (
@@ -11,15 +16,59 @@ function App() {
       {/* Public route - login page */}
       <Route path="/login" element={<LoginPage />} />
       
-      {/* Protected routes - require authentication */}
+      {/* Protected routes with Layout - main navigation pages */}
       <Route
-        path="/projects"
+        path="/dashboard"
         element={
           <ProtectedRoute>
-            <ProjectsPage />
+            <Layout>
+              <DashboardPage />
+            </Layout>
           </ProtectedRoute>
         }
       />
+      <Route
+        path="/funding-programs"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <FundingProgramsPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/companies"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <CompaniesPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/documents"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <DocumentsPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/templates"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <TemplatesPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      
+      {/* Protected routes without Layout - editor pages */}
       <Route
         path="/editor/:companyId/:docType"
         element={
@@ -45,8 +94,9 @@ function App() {
         }
       />
       
-      {/* Default redirect to login */}
-      <Route path="*" element={<Navigate to="/login" />} />
+      {/* Default redirect to dashboard */}
+      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   );
 }

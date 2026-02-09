@@ -29,7 +29,7 @@ export default function LoginPage() {
   // MUST be in useEffect to avoid updating BrowserRouter during render
   useEffect(() => {
     if (isAuthenticated) {
-      navigate("/projects", { replace: true });
+      navigate("/dashboard", { replace: true });
     }
   }, [isAuthenticated, navigate]);
   
@@ -75,7 +75,7 @@ export default function LoginPage() {
           if (data.access_token) {
             // Store token in context and localStorage
             // State update will trigger useEffect to navigate
-            login(data.access_token);
+            login(data.access_token, email.toLowerCase());
             setIsLoading(false);
             // Navigation will be handled by useEffect when isAuthenticated becomes true
           } else {

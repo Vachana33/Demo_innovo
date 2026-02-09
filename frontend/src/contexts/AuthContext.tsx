@@ -12,13 +12,27 @@ import { createContext, useContext, useState, type ReactNode } from "react";
 interface AuthContextType {
   token: string | null;
   isAuthenticated: boolean;
-  login: (token: string) => void;
+  userEmail: string | null;
+  login: (token: string, email?: string) => void;
   logout: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const TOKEN_STORAGE_KEY = "innovo_auth_token";
+const USER_EMAIL_KEY = "innovo_user_email";
+
+// Helper to decode JWT and extract email
+function decodeJWT(token: string): string | null {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    const decoded = JSON.parse(atob(payload));
+    return decoded.email || decoded.sub || null;
+  } catch {
+    return null;
+  }
+}
 
 // Initialize state from localStorage (runs once on module load)
 const getInitialToken = (): string | null => {
@@ -26,30 +40,52 @@ const getInitialToken = (): string | null => {
   return localStorage.getItem(TOKEN_STORAGE_KEY);
 };
 
+const getInitialEmail = (): string | null => {
+  if (typeof window === "undefined") return null;
+  const stored = localStorage.getItem(USER_EMAIL_KEY);
+  if (stored) return stored;
+  // Try to decode from token if email not stored
+  const token = getInitialToken();
+  if (token) {
+    return decodeJWT(token);
+  }
+  return null;
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(getInitialToken);
+  const [userEmail, setUserEmail] = useState<string | null>(getInitialEmail);
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     const storedToken = getInitialToken();
     return storedToken !== null;
   });
 
-  const login = (newToken: string) => {
+  const login = (newToken: string, email?: string) => {
     // Store token in localStorage
     // Security: In production, consider httpOnly cookies for better security
     localStorage.setItem(TOKEN_STORAGE_KEY, newToken);
     setToken(newToken);
     setIsAuthenticated(true);
+    
+    // Extract email from token or use provided email
+    const extractedEmail = email || decodeJWT(newToken);
+    if (extractedEmail) {
+      localStorage.setItem(USER_EMAIL_KEY, extractedEmail);
+      setUserEmail(extractedEmail);
+    }
   };
 
   const logout = () => {
-    // Clear token from storage and state
+    // Clear token and email from storage and state
     localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(USER_EMAIL_KEY);
     setToken(null);
+    setUserEmail(null);
     setIsAuthenticated(false);
   };
 
   return (
-    <AuthContext.Provider value={{ token, isAuthenticated, login, logout }}>
+    <AuthContext.Provider value={{ token, isAuthenticated, userEmail, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
