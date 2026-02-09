@@ -4,7 +4,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.exc import ProgrammingError
 from app.database import get_db
 from app.models import Document, Company, User, FundingProgram
-from app.schemas import DocumentResponse, DocumentUpdate, ChatRequest, ChatResponse, ChatConfirmationRequest
+from app.schemas import DocumentResponse, DocumentUpdate, ChatRequest, ChatResponse, ChatConfirmationRequest, DocumentListItem
 from app.dependencies import get_current_user
 from app.template_resolver import get_template_for_funding_program
 from typing import List, Optional, Tuple, Dict, Any
@@ -575,6 +575,55 @@ def get_document(
             pass
 
     return document
+
+@router.get("/documents", response_model=List[DocumentListItem])
+def list_documents(
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    List all documents for the current user.
+    Returns documents with company and funding program information.
+    """
+    try:
+        # Query documents via company relationship - only documents where company belongs to user
+        documents = db.query(Document).join(Company).filter(
+            Company.user_email == current_user.email
+        ).order_by(Document.updated_at.desc()).all()
+
+        # Build response with company and funding program info
+        result = []
+        for doc in documents:
+            # Get company name
+            company = db.query(Company).filter(Company.id == doc.company_id).first()
+            company_name = company.name if company else f"Company {doc.company_id}"
+
+            # Get funding program title if exists
+            funding_program_title = None
+            if doc.funding_program_id:
+                funding_program = db.query(FundingProgram).filter(
+                    FundingProgram.id == doc.funding_program_id
+                ).first()
+                funding_program_title = funding_program.title if funding_program else None
+
+            result.append(DocumentListItem(
+                id=doc.id,
+                company_id=doc.company_id,
+                company_name=company_name,
+                funding_program_id=doc.funding_program_id,
+                funding_program_title=funding_program_title,
+                type=doc.type,
+                updated_at=doc.updated_at
+            ))
+
+        logger.info(f"Retrieved {len(result)} documents for user {current_user.email}")
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching documents for user {current_user.email}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch documents: {str(e)}"
+        ) from e
 
 @router.put(
     "/documents/{document_id}",

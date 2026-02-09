@@ -15,6 +15,16 @@ type FundingProgram = {
   title: string;
 };
 
+type DocumentListItem = {
+  id: number;
+  company_id: number;
+  company_name: string;
+  funding_program_id?: number;
+  funding_program_title?: string;
+  type: string;
+  updated_at: string;
+};
+
 type Document = {
   id: number;
   company_id: number;
@@ -46,27 +56,34 @@ export default function DocumentsPage() {
     async function fetchData() {
       try {
         setIsLoading(true);
-        const [companiesData, programsData] = await Promise.all([
+        const [documentsData, companiesData, programsData] = await Promise.all([
+          apiGet<DocumentListItem[]>("/documents"),
           apiGet<Company[]>("/companies"),
           apiGet<FundingProgram[]>("/funding-programs"),
         ]);
+        
+        // Map DocumentListItem to Document format for display
+        const mappedDocuments: Document[] = documentsData.map((doc) => ({
+          id: doc.id,
+          company_id: doc.company_id,
+          funding_program_id: doc.funding_program_id,
+          type: doc.type,
+          updated_at: doc.updated_at,
+          company: {
+            id: doc.company_id,
+            name: doc.company_name,
+          },
+          funding_program: doc.funding_program_id && doc.funding_program_title
+            ? {
+                id: doc.funding_program_id,
+                title: doc.funding_program_title,
+              }
+            : undefined,
+        }));
+        
+        setDocuments(mappedDocuments);
         setCompanies(companiesData);
         setFundingPrograms(programsData);
-
-        // Fetch documents by checking each company
-        // Note: This is a workaround since there's no direct /documents endpoint
-        // In production, you might want to add a GET /documents endpoint
-        const allDocuments: Document[] = [];
-        for (const company of companiesData) {
-          try {
-            // Try to get document (this will create if doesn't exist, but we just want to list)
-            // For now, we'll show a simplified view
-            // In a real implementation, you'd want a GET /documents endpoint
-          } catch {
-            // Ignore errors for now
-          }
-        }
-        setDocuments(allDocuments);
       } catch (error: unknown) {
         console.error("Error fetching data:", error);
         if (error instanceof Error && error.message.includes("Authentication required")) {

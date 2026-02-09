@@ -126,6 +126,19 @@ class DocumentResponse(BaseModel):
 class DocumentUpdate(BaseModel):
     content_json: dict
 
+class DocumentListItem(BaseModel):
+    """Response model for listing documents - includes company and funding program info"""
+    id: int
+    company_id: int
+    company_name: str
+    funding_program_id: Optional[int] = None
+    funding_program_title: Optional[str] = None
+    type: str
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
 # Chat Schemas
 class ChatRequest(BaseModel):
     message: str
