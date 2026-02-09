@@ -23,13 +23,3 @@ export default function ProtectedRoute({ children }: ProtectedRouteProps) {
   // User is authenticated, render the protected content
   return <>{children}</>;
 }
-
-
-
-
-
-
-
-
-
-
