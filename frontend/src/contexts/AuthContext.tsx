@@ -4,6 +4,7 @@ import {
   USER_EMAIL_KEY,
   decodeJWT,
 } from "../utils/authUtils";
+import { debugLog } from "../utils/debugLog";
 
 interface AuthContextType {
   token: string | null;
@@ -56,20 +57,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 // eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AuthContext.tsx:useAuth:ENTRY',message:'useAuth hook called',data:{},hypothesisId:'A'})}).catch(()=>{});
+  debugLog("AuthContext.tsx:useAuth:ENTRY", "useAuth hook called", {}, "A");
   // #endregion
   const context = useContext(AuthContext);
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AuthContext.tsx:useAuth:CONTEXT_CHECK',message:'Context check result',data:{isUndefined:context===undefined,hasToken:!!context?.token,hasUserEmail:!!context?.userEmail},hypothesisId:'A'})}).catch(()=>{});
+  debugLog("AuthContext.tsx:useAuth:CONTEXT_CHECK", "Context check result", { isUndefined: context === undefined, hasToken: !!context?.token, hasUserEmail: !!context?.userEmail }, "A");
   // #endregion
   if (context === undefined) {
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AuthContext.tsx:useAuth:ERROR',message:'useAuth called outside AuthProvider',data:{},hypothesisId:'A'})}).catch(()=>{});
+    debugLog("AuthContext.tsx:useAuth:ERROR", "useAuth called outside AuthProvider", {}, "A");
     // #endregion
     throw new Error("useAuth must be used within an AuthProvider");
   }
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AuthContext.tsx:useAuth:SUCCESS',message:'useAuth returning context',data:{isAuthenticated:context.isAuthenticated,hasUserEmail:!!context.userEmail},hypothesisId:'A'})}).catch(()=>{});
+  debugLog("AuthContext.tsx:useAuth:SUCCESS", "useAuth returning context", { isAuthenticated: context.isAuthenticated, hasUserEmail: !!context.userEmail }, "A");
   // #endregion
   return context;
 }

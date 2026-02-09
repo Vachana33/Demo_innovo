@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
 import { apiGet } from "../../utils/api";
+import { debugLog } from "../../utils/debugLog";
 import styles from "./DocumentsPage.module.css";
 
 type Company = {
@@ -55,12 +56,12 @@ export default function DocumentsPage() {
   useEffect(() => {
     async function fetchData() {
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'DocumentsPage.tsx:fetchData:ENTRY',message:'Starting data fetch',data:{},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+      debugLog("DocumentsPage.tsx:fetchData:ENTRY", "Starting data fetch", {}, "D");
       // #endregion
       try {
         setIsLoading(true);
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'DocumentsPage.tsx:fetchData:BEFORE_API',message:'About to call APIs',data:{},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+        debugLog("DocumentsPage.tsx:fetchData:BEFORE_API", "About to call APIs", {}, "D");
         // #endregion
         const [documentsData, companiesData, programsData] = await Promise.all([
           apiGet<DocumentListItem[]>("/documents"),
@@ -69,7 +70,7 @@ export default function DocumentsPage() {
         ]);
         
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'DocumentsPage.tsx:fetchData:AFTER_API',message:'API calls completed',data:{documentsCount:documentsData?.length||0,companiesCount:companiesData?.length||0,programsCount:programsData?.length||0},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+        debugLog("DocumentsPage.tsx:fetchData:AFTER_API", "API calls completed", { documentsCount: documentsData?.length || 0, companiesCount: companiesData?.length || 0, programsCount: programsData?.length || 0 }, "D");
         // #endregion
         
         // Map DocumentListItem to Document format for display
@@ -92,17 +93,17 @@ export default function DocumentsPage() {
         }));
         
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'DocumentsPage.tsx:fetchData:BEFORE_SET_STATE',message:'About to set state',data:{mappedCount:mappedDocuments.length},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+        debugLog("DocumentsPage.tsx:fetchData:BEFORE_SET_STATE", "About to set state", { mappedCount: mappedDocuments.length }, "D");
         // #endregion
         setDocuments(mappedDocuments);
         setCompanies(companiesData);
         setFundingPrograms(programsData);
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'DocumentsPage.tsx:fetchData:SUCCESS',message:'Data fetch succeeded',data:{},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+        debugLog("DocumentsPage.tsx:fetchData:SUCCESS", "Data fetch succeeded", {}, "D");
         // #endregion
       } catch (error: unknown) {
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'DocumentsPage.tsx:fetchData:ERROR',message:'Data fetch error',data:{error:String(error),errorType:error instanceof Error?error.constructor.name:'unknown',errorMessage:error instanceof Error?error.message:'no message'},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+        debugLog("DocumentsPage.tsx:fetchData:ERROR", "Data fetch error", { error: String(error), errorType: error instanceof Error ? error.constructor.name : 'unknown', errorMessage: error instanceof Error ? error.message : 'no message' }, "D");
         // #endregion
         console.error("Error fetching data:", error);
         if (error instanceof Error && (error.message.includes("Authentication required") || error.message === "AUTH_EXPIRED")) {

@@ -2,6 +2,8 @@
  * API utility functions for making authenticated requests.
  */
 
+import { debugLog } from "./debugLog";
+
 const envApiUrl = import.meta.env.VITE_API_URL;
 const isProduction = import.meta.env.PROD;
 
@@ -23,7 +25,7 @@ export async function apiRequest<T = unknown>(
   options: RequestInit = {}
 ): Promise<T> {
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:ENTRY',message:'API request started',data:{endpoint,method:options.method||'GET'},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+  debugLog("api.ts:apiRequest:ENTRY", "API request started", { endpoint, method: options.method || 'GET' }, "B");
   // #endregion
   const token = getAuthToken();
 
@@ -37,7 +39,7 @@ export async function apiRequest<T = unknown>(
   }
 
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:BEFORE_FETCH',message:'About to fetch',data:{url:`${API_BASE_URL}${endpoint}`,hasToken:!!token},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+  debugLog("api.ts:apiRequest:BEFORE_FETCH", "About to fetch", { url: `${API_BASE_URL}${endpoint}`, hasToken: !!token }, "B");
   // #endregion
 
   try {
@@ -47,13 +49,13 @@ export async function apiRequest<T = unknown>(
     });
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:AFTER_FETCH',message:'Fetch response received',data:{status:response.status,statusText:response.statusText,endpoint},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+    debugLog("api.ts:apiRequest:AFTER_FETCH", "Fetch response received", { status: response.status, statusText: response.statusText, endpoint }, "B");
     // #endregion
 
     // 🔴 AUTH HANDLING (NO REDIRECT HERE)
     if (response.status === 401) {
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:401',message:'Unauthorized - clearing auth',data:{endpoint},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+      debugLog("api.ts:apiRequest:401", "Unauthorized - clearing auth", { endpoint }, "B");
       // #endregion
       localStorage.removeItem(TOKEN_STORAGE_KEY);
       localStorage.removeItem(USER_EMAIL_KEY);
@@ -71,13 +73,13 @@ export async function apiRequest<T = unknown>(
     if (isJson) {
       const text = await response.text();
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:PARSE_JSON',message:'Parsing JSON response',data:{textLength:text.length,endpoint},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
+      debugLog("api.ts:apiRequest:PARSE_JSON", "Parsing JSON response", { textLength: text.length, endpoint }, "C");
       // #endregion
       try {
         data = text ? JSON.parse(text) : null;
       } catch (parseError) {
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:JSON_PARSE_ERROR',message:'JSON parse failed',data:{error:String(parseError),textPreview:text.substring(0,100),endpoint},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
+        debugLog("api.ts:apiRequest:JSON_PARSE_ERROR", "JSON parse failed", { error: String(parseError), textPreview: text.substring(0, 100), endpoint }, "C");
         // #endregion
         throw parseError;
       }
@@ -86,18 +88,18 @@ export async function apiRequest<T = unknown>(
     if (!response.ok) {
       const err = data as { detail?: string; message?: string };
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:NOT_OK',message:'Response not OK',data:{status:response.status,error:err?.detail||err?.message||'Request failed',endpoint},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+      debugLog("api.ts:apiRequest:NOT_OK", "Response not OK", { status: response.status, error: err?.detail || err?.message || 'Request failed', endpoint }, "B");
       // #endregion
       throw new Error(err?.detail || err?.message || "Request failed");
     }
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:SUCCESS',message:'API request succeeded',data:{endpoint,dataType:typeof data},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+    debugLog("api.ts:apiRequest:SUCCESS", "API request succeeded", { endpoint, dataType: typeof data }, "B");
     // #endregion
     return data as T;
   } catch (error) {
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiRequest:ERROR',message:'API request error',data:{error:String(error),errorType:error instanceof Error?error.constructor.name:'unknown',endpoint},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+    debugLog("api.ts:apiRequest:ERROR", "API request error", { error: String(error), errorType: error instanceof Error ? error.constructor.name : 'unknown', endpoint }, "B");
     // #endregion
     throw error;
   }
@@ -131,7 +133,7 @@ export async function apiUploadFile(
   additionalData?: Record<string, string>
 ): Promise<Record<string, unknown>> {
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiUploadFile:ENTRY',message:'File upload started',data:{endpoint,fileName:file.name,fileSize:file.size},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+  debugLog("api.ts:apiUploadFile:ENTRY", "File upload started", { endpoint, fileName: file.name, fileSize: file.size }, "F");
   // #endregion
   const token = getAuthToken();
   const formData = new FormData();
@@ -157,7 +159,7 @@ export async function apiUploadFile(
     });
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiUploadFile:AFTER_FETCH',message:'Upload response received',data:{status:response.status,endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+    debugLog("api.ts:apiUploadFile:AFTER_FETCH", "Upload response received", { status: response.status, endpoint }, "F");
     // #endregion
 
     if (response.status === 401) {
@@ -170,18 +172,18 @@ export async function apiUploadFile(
 
     if (!response.ok) {
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiUploadFile:ERROR',message:'Upload failed',data:{status:response.status,error:data?.detail||data?.message||'Upload failed',endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+      debugLog("api.ts:apiUploadFile:ERROR", "Upload failed", { status: response.status, error: data?.detail || data?.message || 'Upload failed', endpoint }, "F");
       // #endregion
       throw new Error(data.detail || data.message || "Upload failed");
     }
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiUploadFile:SUCCESS',message:'File upload succeeded',data:{endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+    debugLog("api.ts:apiUploadFile:SUCCESS", "File upload succeeded", { endpoint }, "F");
     // #endregion
     return data;
   } catch (error) {
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiUploadFile:EXCEPTION',message:'Upload exception',data:{error:String(error),errorType:error instanceof Error?error.constructor.name:'unknown',endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+    debugLog("api.ts:apiUploadFile:EXCEPTION", "Upload exception", { error: String(error), errorType: error instanceof Error ? error.constructor.name : 'unknown', endpoint }, "F");
     // #endregion
     throw error;
   }
@@ -193,7 +195,7 @@ export async function apiUploadFile(
  */
 export async function apiDownloadFile(endpoint: string): Promise<Response> {
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiDownloadFile:ENTRY',message:'File download started',data:{endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+  debugLog("api.ts:apiDownloadFile:ENTRY", "File download started", { endpoint }, "F");
   // #endregion
   const token = getAuthToken();
   const headers: Record<string, string> = {};
@@ -209,7 +211,7 @@ export async function apiDownloadFile(endpoint: string): Promise<Response> {
     });
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiDownloadFile:AFTER_FETCH',message:'Download response received',data:{status:response.status,endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+    debugLog("api.ts:apiDownloadFile:AFTER_FETCH", "Download response received", { status: response.status, endpoint }, "F");
     // #endregion
 
     if (response.status === 401) {
@@ -228,18 +230,18 @@ export async function apiDownloadFile(endpoint: string): Promise<Response> {
         errorMessage = errorText || errorMessage;
       }
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiDownloadFile:ERROR',message:'Download failed',data:{status:response.status,error:errorMessage,endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+      debugLog("api.ts:apiDownloadFile:ERROR", "Download failed", { status: response.status, error: errorMessage, endpoint }, "F");
       // #endregion
       throw new Error(errorMessage);
     }
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiDownloadFile:SUCCESS',message:'File download succeeded',data:{endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+    debugLog("api.ts:apiDownloadFile:SUCCESS", "File download succeeded", { endpoint }, "F");
     // #endregion
     return response;
   } catch (error) {
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:apiDownloadFile:EXCEPTION',message:'Download exception',data:{error:String(error),errorType:error instanceof Error?error.constructor.name:'unknown',endpoint},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
+    debugLog("api.ts:apiDownloadFile:EXCEPTION", "Download exception", { error: String(error), errorType: error instanceof Error ? error.constructor.name : 'unknown', endpoint }, "F");
     // #endregion
     throw error;
   }
