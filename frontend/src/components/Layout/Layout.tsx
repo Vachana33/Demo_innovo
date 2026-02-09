@@ -10,9 +10,18 @@ interface LayoutProps {
 }
 
 export default function Layout({ children }: LayoutProps) {
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Layout.tsx:Layout:ENTRY',message:'Layout component rendering',data:{},hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
   const location = useLocation();
   const navigate = useNavigate();
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Layout.tsx:Layout:BEFORE_USE_AUTH',message:'About to call useAuth',data:{},hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
   const { logout, userEmail } = useAuth();
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'Layout.tsx:Layout:AFTER_USE_AUTH',message:'useAuth succeeded',data:{hasUserEmail:!!userEmail,userEmailLength:userEmail?.length||0},hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
 
   const handleLogout = () => {
     logout();

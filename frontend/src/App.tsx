@@ -11,6 +11,9 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import Layout from "./components/Layout/Layout";
 
 function App() {
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'App.tsx:App:ENTRY',message:'App component rendering',data:{pathname:window.location.pathname},timestamp:Date.now(),hypothesisId:'E'})}).catch(()=>{});
+  // #endregion
   return (
     <Routes>
       {/* Public route - login page */}

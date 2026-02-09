@@ -1,13 +1,9 @@
-/**
- * Authentication Context for managing user authentication state.
- * 
- * Security considerations:
- * - JWT token is stored in localStorage (not httpOnly cookies, but acceptable for SPA)
- * - Token is cleared on logout
- * - Token expiration is checked on each API call
- * - Auth state is checked on app initialization
- */
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useState, useContext, type ReactNode } from "react";
+import {
+  TOKEN_STORAGE_KEY,
+  USER_EMAIL_KEY,
+  decodeJWT,
+} from "../utils/authUtils";
 
 interface AuthContextType {
   token: string | null;
@@ -17,57 +13,23 @@ interface AuthContextType {
   logout: () => void;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-const TOKEN_STORAGE_KEY = "innovo_auth_token";
-const USER_EMAIL_KEY = "innovo_user_email";
-
-// Helper to decode JWT and extract email
-function decodeJWT(token: string): string | null {
-  try {
-    const payload = token.split(".")[1];
-    if (!payload) return null;
-    const decoded = JSON.parse(atob(payload));
-    return decoded.email || decoded.sub || null;
-  } catch {
-    return null;
-  }
-}
-
-// Initialize state from localStorage (runs once on module load)
-const getInitialToken = (): string | null => {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(TOKEN_STORAGE_KEY);
-};
-
-const getInitialEmail = (): string | null => {
-  if (typeof window === "undefined") return null;
-  const stored = localStorage.getItem(USER_EMAIL_KEY);
-  if (stored) return stored;
-  // Try to decode from token if email not stored
-  const token = getInitialToken();
-  if (token) {
-    return decodeJWT(token);
-  }
-  return null;
-};
+// eslint-disable-next-line react-refresh/only-export-components
+export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(getInitialToken);
-  const [userEmail, setUserEmail] = useState<string | null>(getInitialEmail);
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    const storedToken = getInitialToken();
-    return storedToken !== null;
-  });
+  const [token, setToken] = useState<string | null>(
+    localStorage.getItem(TOKEN_STORAGE_KEY)
+  );
+  const [userEmail, setUserEmail] = useState<string | null>(
+    localStorage.getItem(USER_EMAIL_KEY)
+  );
+
+  const isAuthenticated = Boolean(token);
 
   const login = (newToken: string, email?: string) => {
-    // Store token in localStorage
-    // Security: In production, consider httpOnly cookies for better security
     localStorage.setItem(TOKEN_STORAGE_KEY, newToken);
     setToken(newToken);
-    setIsAuthenticated(true);
-    
-    // Extract email from token or use provided email
+
     const extractedEmail = email || decodeJWT(newToken);
     if (extractedEmail) {
       localStorage.setItem(USER_EMAIL_KEY, extractedEmail);
@@ -76,16 +38,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = () => {
-    // Clear token and email from storage and state
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     localStorage.removeItem(USER_EMAIL_KEY);
     setToken(null);
     setUserEmail(null);
-    setIsAuthenticated(false);
   };
 
   return (
-    <AuthContext.Provider value={{ token, isAuthenticated, userEmail, login, logout }}>
+    <AuthContext.Provider
+      value={{ token, isAuthenticated, userEmail, login, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );
@@ -93,14 +55,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function useAuth() {
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AuthContext.tsx:useAuth:ENTRY',message:'useAuth hook called',data:{},hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
   const context = useContext(AuthContext);
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AuthContext.tsx:useAuth:CONTEXT_CHECK',message:'Context check result',data:{isUndefined:context===undefined,hasToken:!!context?.token,hasUserEmail:!!context?.userEmail},hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
   if (context === undefined) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AuthContext.tsx:useAuth:ERROR',message:'useAuth called outside AuthProvider',data:{},hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
     throw new Error("useAuth must be used within an AuthProvider");
   }
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AuthContext.tsx:useAuth:SUCCESS',message:'useAuth returning context',data:{isAuthenticated:context.isAuthenticated,hasUserEmail:!!context.userEmail},hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
   return context;
 }
-
-
-
-
-
