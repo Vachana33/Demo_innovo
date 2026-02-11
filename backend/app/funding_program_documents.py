@@ -11,7 +11,8 @@ logger = logging.getLogger(__name__)
 
 # Category keywords for automatic detection
 CATEGORY_KEYWORDS = {
-    "general_guidelines": ["general", "guideline", "overview", "guidelines"],
+    "guidelines": ["guideline", "guidelines"],
+    "general_guidelines": ["general", "overview"],
     "application_companies": ["company", "companies", "research institution", "research institutions", "application process"],
     "knowledge_transfer": ["knowledge", "technology transfer", "transfer", "knowledge transfer"],
     "university_procedures": ["university", "universities", "procedure", "procedures"]
@@ -43,8 +44,8 @@ def detect_category_from_filename(filename: str, folder_path: str = "") -> str:
                 return category
 
     # Default fallback
-    logger.info(f"No category match found for {filename}, defaulting to 'general_guidelines'")
-    return "general_guidelines"
+    logger.info(f"No category match found for {filename}, defaulting to 'guidelines'")
+    return "guidelines"
 
 
 def validate_category(category: str) -> bool:

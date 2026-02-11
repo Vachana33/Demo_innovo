@@ -35,16 +35,6 @@ class FundingProgram(Base):
     template_source = Column(String, nullable=True, index=True)  # "system" | "user"
     template_ref = Column(String, nullable=True, index=True)  # System template name or user template UUID
 
-    # Phase 4: Scraping fields
-    description = Column(Text, nullable=True)  # Scraped description
-    sections_json = Column(JSON, nullable=True)  # Scraped sections
-    content_hash = Column(String, nullable=True)  # Hash of scraped content
-    last_scraped_at = Column(DateTime(timezone=True), nullable=True)  # Last scrape timestamp
-
-    # Phase 4: Guidelines text fields
-    guidelines_text = Column(Text, nullable=True)  # Text content from guidelines files
-    guidelines_text_file_id = Column(UUID(as_uuid=True), ForeignKey("files.id"), nullable=True)  # Reference to file
-
     # Relationship to user (owner)
     user = relationship("User", back_populates="funding_programs")
 

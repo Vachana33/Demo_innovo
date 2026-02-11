@@ -4,48 +4,14 @@ from app.database import get_db
 from app.models import FundingProgram, User, FundingProgramDocument, File as FileModel
 from app.schemas import FundingProgramCreate, FundingProgramResponse, FundingProgramDocumentResponse, FundingProgramDocumentListResponse
 from app.dependencies import get_current_user
-from app.funding_program_scraper import scrape_funding_program
 from app.file_storage import get_or_create_file
 from app.document_extraction import extract_document_text
 from app.processing_cache import get_cached_document_text
 from app.funding_program_documents import detect_category_from_filename, validate_category, get_file_type_from_filename, is_text_file
 from typing import List, Optional
-from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
-
-def _auto_scrape_program(program: FundingProgram, db: Session) -> None:
-    """
-    Automatically scrape funding program data if website is provided.
-    Runs in background - errors are logged but don't fail the request.
-    """
-    if not program.website:
-        return
-
-    try:
-        logger.info(f"[AUTO-SCRAPE] Starting automatic scrape for funding_program_id={program.id}, url={program.website}")
-        scraped_data = scrape_funding_program(program.website)
-
-        if scraped_data:
-            program.description = scraped_data.get("description")
-            program.sections_json = scraped_data.get("sections", [])
-            program.content_hash = scraped_data.get("content_hash")
-            program.last_scraped_at = datetime.utcnow()
-
-            # Optionally update title if program_name was scraped and title is generic
-            if scraped_data.get("program_name") and scraped_data["program_name"] != program.title:
-                if not program.title or program.title.lower() in ["funding program", "new funding program"]:
-                    program.title = scraped_data["program_name"]
-
-            db.commit()
-            logger.info(f"[AUTO-SCRAPE] Automatic scraping completed for funding_program_id={program.id}, sections={len(scraped_data.get('sections', []))}")
-        else:
-            logger.warning(f"[AUTO-SCRAPE] Scraping returned no data for funding_program_id={program.id}")
-    except Exception as e:
-        logger.error(f"[AUTO-SCRAPE] Error in automatic scraping for funding_program_id={program.id}: {str(e)}")
-        # Don't fail the request - just log the error
-        db.rollback()
 
 router = APIRouter()
 
@@ -83,11 +49,6 @@ def create_funding_program(
         db.add(new_program)
         db.commit()
         db.refresh(new_program)
-
-        # Automatically scrape if website is provided
-        if new_program.website:
-            _auto_scrape_program(new_program, db)
-            db.refresh(new_program)  # Refresh to get scraped data
 
         return new_program
     except Exception as e:
@@ -146,7 +107,6 @@ def update_funding_program(
         )
 
     # Update funding program
-    old_website = funding_program.website
     funding_program.title = program_data.title.strip()
     # Handle empty website string - convert to None
     website_value = program_data.website.strip() if program_data.website else None
@@ -160,11 +120,6 @@ def update_funding_program(
     try:
         db.commit()
         db.refresh(funding_program)
-
-        # Automatically scrape if website was added or changed
-        if funding_program.website and (not old_website or old_website != funding_program.website):
-            _auto_scrape_program(funding_program, db)
-            db.refresh(funding_program)  # Refresh to get scraped data
 
         return funding_program
     except Exception:
@@ -194,6 +149,11 @@ def delete_funding_program(
         )
 
     try:
+        # Delete all related funding_program_documents
+        db.query(FundingProgramDocument).filter(
+            FundingProgramDocument.funding_program_id == funding_program_id
+        ).delete()
+        
         db.delete(funding_program)
         db.commit()
         return None
@@ -205,149 +165,129 @@ def delete_funding_program(
         ) from None
 
 
-@router.post("/funding-programs/{funding_program_id}/scrape", response_model=FundingProgramResponse)
-def scrape_funding_program_data(
-    funding_program_id: int,
-    db: Session = Depends(get_db),  # noqa: B008
-    current_user: User = Depends(get_current_user)  # noqa: B008
-):
-    """
-    Scrape funding program data from the program's website.
-    Updates the funding program with scraped data (description, sections, PDF links).
-    """
-    funding_program = db.query(FundingProgram).filter(
-        FundingProgram.id == funding_program_id,
-        FundingProgram.user_email == current_user.email
-    ).first()
-    if not funding_program:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Funding program not found"
-        )
-
-    if not funding_program.website:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Funding program has no website URL to scrape"
-        )
-
-    try:
-        logger.info(f"[SCRAPING] Starting scrape for funding_program_id={funding_program_id}, url={funding_program.website}")
-
-        # Scrape the website
-        scraped_data = scrape_funding_program(funding_program.website)
-
-        if not scraped_data:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to scrape funding program data from website"
-            )
-
-        # Update funding program with scraped data
-        funding_program.description = scraped_data.get("description")
-        funding_program.sections_json = scraped_data.get("sections", [])
-        funding_program.content_hash = scraped_data.get("content_hash")
-        funding_program.last_scraped_at = datetime.utcnow()
-
-        # Optionally update title if program_name was scraped and different
-        if scraped_data.get("program_name") and scraped_data["program_name"] != funding_program.title:
-            # Only update if title is generic or empty
-            if not funding_program.title or funding_program.title.lower() in ["funding program", "new funding program"]:
-                funding_program.title = scraped_data["program_name"]
-
-        db.commit()
-        db.refresh(funding_program)
-
-        logger.info(f"[SCRAPING] Scraping completed for funding_program_id={funding_program_id}, sections={len(scraped_data.get('sections', []))}")
-        return funding_program
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"[SCRAPING] Error scraping funding_program_id={funding_program_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to scrape funding program: {str(e)}"
-        ) from e
-
-
-@router.post("/funding-programs/{funding_program_id}/refresh", response_model=FundingProgramResponse)
-def refresh_funding_program_data(
-    funding_program_id: int,
-    db: Session = Depends(get_db),  # noqa: B008
-    current_user: User = Depends(get_current_user)  # noqa: B008
-):
-    """
-    Refresh funding program data by re-scraping the website.
-    Only re-scrapes if the website content has changed (based on content hash).
-    Returns the funding program with updated data if changed, or existing data if unchanged.
-    """
-    funding_program = db.query(FundingProgram).filter(
-        FundingProgram.id == funding_program_id,
-        FundingProgram.user_email == current_user.email
-    ).first()
-    if not funding_program:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Funding program not found"
-        )
-
-    if not funding_program.website:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Funding program has no website URL to scrape"
-        )
-
-    try:
-        logger.info(f"[REFRESH] Starting refresh for funding_program_id={funding_program_id}, url={funding_program.website}")
-
-        # Scrape the website
-        scraped_data = scrape_funding_program(funding_program.website)
-
-        if not scraped_data:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to scrape funding program data from website"
-            )
-
-        new_content_hash = scraped_data.get("content_hash")
-        old_content_hash = funding_program.content_hash
-
-        # Check if content has changed
-        if new_content_hash == old_content_hash:
-            logger.info(f"[REFRESH] Content unchanged for funding_program_id={funding_program_id}, hash={new_content_hash}")
-            return funding_program  # No changes, return existing data
-
-        # Content has changed, update the funding program
-        logger.info(f"[REFRESH] Content changed for funding_program_id={funding_program_id}, updating data")
-        funding_program.description = scraped_data.get("description")
-        funding_program.sections_json = scraped_data.get("sections", [])
-        funding_program.content_hash = new_content_hash
-        funding_program.last_scraped_at = datetime.utcnow()
-
-        # Optionally update title if program_name was scraped and different
-        if scraped_data.get("program_name") and scraped_data["program_name"] != funding_program.title:
-            if not funding_program.title or funding_program.title.lower() in ["funding program", "new funding program"]:
-                funding_program.title = scraped_data["program_name"]
-
-        db.commit()
-        db.refresh(funding_program)
-
-        logger.info(f"[REFRESH] Refresh completed for funding_program_id={funding_program_id}, sections={len(scraped_data.get('sections', []))}")
-        return funding_program
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"[REFRESH] Error refreshing funding_program_id={funding_program_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to refresh funding program: {str(e)}"
-        ) from e
 
 # Phase 4: Funding Program Document Ingestion Endpoints
+
+@router.post("/funding-programs/{funding_program_id}/guidelines/upload", response_model=List[FundingProgramDocumentResponse])
+async def upload_funding_program_guidelines(
+    funding_program_id: int,
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    Upload multiple guidelines documents (PDFs, DOCX) for a funding program.
+    
+    - Accepts: PDF, DOCX files
+    - Category: Automatically set to "guidelines"
+    - Extracts text and stores in DocumentTextCache
+    - Returns list of uploaded documents with their IDs
+    """
+    # Verify funding program exists and user owns it
+    funding_program = db.query(FundingProgram).filter(
+        FundingProgram.id == funding_program_id,
+        FundingProgram.user_email == current_user.email
+    ).first()
+
+    if not funding_program:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Funding program not found"
+        )
+
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files provided"
+        )
+
+    uploaded_documents = []
+
+    try:
+        for file in files:
+            # Read file content
+            content = await file.read()
+
+            # Determine file type
+            file_type = get_file_type_from_filename(file.filename or "unknown")
+
+            # Validate file type - only PDF and DOCX allowed
+            if file_type not in ["pdf", "docx"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported file type: {file_type}. Only PDF and DOCX files are allowed."
+                )
+
+            # Get or create file record (hash-based deduplication)
+            file_record, is_new = get_or_create_file(
+                db=db,
+                file_bytes=content,
+                file_type=file_type,
+                filename=file.filename
+            )
+
+            # Extract text for PDFs/DOCX (uses existing caching)
+            _ = extract_document_text(
+                file_bytes=content,
+                file_content_hash=file_record.content_hash,
+                file_type=file_type,
+                db=db
+            )
+
+            # Create FundingProgramDocument record with category="guidelines"
+            program_document = FundingProgramDocument(
+                funding_program_id=funding_program_id,
+                file_id=file_record.id,
+                category="guidelines",
+                original_filename=file.filename or "unknown",
+                uploaded_by=current_user.email
+            )
+
+            db.add(program_document)
+            uploaded_documents.append(program_document)
+
+            logger.info(f"Uploaded guidelines document: {file.filename} (file_type: {file_type})")
+
+        db.commit()
+
+        # Refresh documents to get IDs
+        for doc in uploaded_documents:
+            db.refresh(doc)
+
+        # Build response
+        response_docs = []
+        for doc in uploaded_documents:
+            file_record = db.query(FileModel).filter(FileModel.id == doc.file_id).first()
+            has_text = False
+            if file_record:
+                cached_text = get_cached_document_text(db, file_record.content_hash)
+                has_text = cached_text is not None
+
+            response_docs.append(FundingProgramDocumentResponse(
+                id=str(doc.id),
+                funding_program_id=doc.funding_program_id,
+                file_id=str(doc.file_id),
+                category=doc.category,
+                original_filename=doc.original_filename,
+                display_name=doc.display_name,
+                uploaded_at=doc.uploaded_at,
+                file_type=file_record.file_type if file_record else "unknown",
+                file_size=file_record.size_bytes if file_record else 0,
+                has_extracted_text=has_text
+            ))
+
+        return response_docs
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error uploading guidelines for funding_program_id={funding_program_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload guidelines: {str(e)}"
+        ) from e
+
 
 @router.post("/funding-programs/{funding_program_id}/documents/upload", response_model=List[FundingProgramDocumentResponse])
 async def upload_funding_program_documents(
@@ -358,10 +298,9 @@ async def upload_funding_program_documents(
     current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
-    Upload multiple documents (PDFs, text files) for a funding program.
+    Upload multiple documents (PDFs, DOCX) for a funding program.
 
-    - PDFs: Extracted and stored in DocumentTextCache
-    - Text files: Stored in FundingProgram.guidelines_text
+    - PDFs/DOCX: Extracted and stored in DocumentTextCache
     - Auto-organizes by folder structure if category not provided
     - Returns list of uploaded documents with their IDs
     """
@@ -393,8 +332,8 @@ async def upload_funding_program_documents(
             # Determine file type
             file_type = get_file_type_from_filename(file.filename or "unknown")
 
-            # Validate file type
-            if file_type not in ["pdf", "docx", "txt"]:
+            # Validate file type - only PDF and DOCX allowed
+            if file_type not in ["pdf", "docx"]:
                 logger.warning(f"Skipping unsupported file type: {file_type} for {file.filename}")
                 continue
 
@@ -409,15 +348,7 @@ async def upload_funding_program_documents(
             # Determine category
             detected_category = category if category and validate_category(category) else detect_category_from_filename(file.filename or "")
             if not validate_category(detected_category):
-                detected_category = "general_guidelines"  # Fallback
-
-            # Handle text files specially
-            if is_text_file(file.filename or ""):
-                # Store text content in FundingProgram.guidelines_text
-                text_content = content.decode('utf-8', errors='ignore')
-                funding_program.guidelines_text = text_content
-                funding_program.guidelines_text_file_id = file_record.id
-                logger.info(f"Stored text file content in guidelines_text for funding_program_id={funding_program_id}")
+                detected_category = "guidelines"  # Fallback
 
             # Extract text for PDFs/DOCX (uses existing caching)
             # The extraction triggers caching - result not needed here
@@ -603,14 +534,13 @@ def get_document_text(
 
     # Get text based on file type
     if file_record.file_type == "txt":
-        # For text files, return from guidelines_text if available
-        if funding_program.guidelines_text:
-            return {"text": funding_program.guidelines_text, "source": "guidelines_text"}
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Text content not found"
-            )
+        # For text files, read from file storage
+        # Note: Text files should be stored in Supabase Storage, not in database
+        # For now, return error - text files should be PDF/DOCX for extraction
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Text file extraction not supported. Please use PDF or DOCX files."
+        )
     elif file_record.file_type in ["pdf", "docx"]:
         # For PDFs/DOCX, get from cache
         extracted_text = get_cached_document_text(db, file_record.content_hash)
@@ -662,11 +592,6 @@ def delete_funding_program_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-
-    # If this is the text file referenced in guidelines_text_file_id, clear it
-    if funding_program.guidelines_text_file_id == document.file_id:
-        funding_program.guidelines_text = None
-        funding_program.guidelines_text_file_id = None
 
     # Delete document record
     db.delete(document)
