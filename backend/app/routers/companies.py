@@ -3,14 +3,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from app.database import get_db
-from app.models import FundingProgram, Company, Document, funding_program_companies, User
-from app.schemas import CompanyCreate, CompanyResponse
+from app.models import FundingProgram, Company, Document, funding_program_companies, User, CompanyDocument
+from app.schemas import CompanyCreate, CompanyResponse, CompanyDocumentResponse, CompanyDocumentListResponse
 from app.preprocessing import crawl_website, transcribe_audio
 from app.extraction import extract_company_profile
 from app.dependencies import get_current_user
 from app.file_storage import get_or_create_file, get_file_by_id, download_from_supabase_storage, compute_file_hash
 from app.audio_compression import compress_audio, validate_audio_size
 from app.models import File as FileModel
+from app.document_extraction import extract_document_text
+from app.processing_cache import get_cached_document_text
+from app.funding_program_documents import get_file_type_from_filename
 from typing import List
 from datetime import datetime, timezone
 import logging
@@ -186,11 +189,19 @@ def process_company_background(company_id: int, website: str = None, audio_path:
         if website:
             try:
                 logger.info(f"Extracting website data for company_id={company_id} (url={website})")
-                # Phase 2: Pass db session for cache lookup/storage
-                website_text = crawl_website(website, db=db)
-                if website_text:
-                    company.website_text = website_text
-                    logger.info(f"Website data extraction completed for company_id={company_id} (extracted {len(website_text)} characters)")
+                # Use new About page scraping
+                from app.website_scraping import scrape_about_page
+                from app.text_cleaning import clean_website_text
+                
+                website_raw, _ = scrape_about_page(website, db=db)
+                if website_raw:
+                    company.website_raw_text = website_raw
+                    # Clean the website text
+                    website_clean = clean_website_text(website_raw)
+                    company.website_clean_text = website_clean
+                    # Keep legacy field for backward compatibility
+                    company.website_text = website_clean
+                    logger.info(f"Website data extraction completed for company_id={company_id} (raw: {len(website_raw)} chars, clean: {len(website_clean)} chars)")
                 else:
                     logger.warning(f"Website data extraction returned no text for company_id={company_id}")
             except Exception as e:
@@ -226,14 +237,20 @@ def process_company_background(company_id: int, website: str = None, audio_path:
                     try:
                         logger.info(f"Transcribing audio for company_id={company_id} (file_id={audio_path})")
                         # Phase 2: Pass file_content_hash and db session for cache lookup/storage
-                        transcript_text = transcribe_audio(
+                        transcript_raw = transcribe_audio(
                             tmp_audio_path,
                             file_content_hash=file_record.content_hash,
                             db=db
                         )
-                        if transcript_text:
-                            company.transcript_text = transcript_text
-                            logger.info(f"Audio transcription completed for company_id={company_id} (transcript length: {len(transcript_text)} characters)")
+                        if transcript_raw:
+                            company.transcript_raw = transcript_raw
+                            # Clean the transcript
+                            from app.text_cleaning import clean_transcript
+                            transcript_clean = clean_transcript(transcript_raw)
+                            company.transcript_clean = transcript_clean
+                            # Keep legacy field for backward compatibility
+                            company.transcript_text = transcript_clean
+                            logger.info(f"Audio transcription completed for company_id={company_id} (raw: {len(transcript_raw)} chars, clean: {len(transcript_clean)} chars)")
                         else:
                             logger.warning(f"Audio transcription returned no text for company_id={company_id}")
                     finally:
@@ -253,10 +270,16 @@ def process_company_background(company_id: int, website: str = None, audio_path:
                     logger.info(f"Transcribing audio for company_id={company_id} (legacy audio_path={resolved_audio_path})")
                     # Phase 2: For legacy paths, we don't have content_hash, so cache won't be used
                     # Pass db session anyway in case we want to add hash computation for legacy files later
-                    transcript_text = transcribe_audio(resolved_audio_path, file_content_hash=None, db=db)
-                    if transcript_text:
-                        company.transcript_text = transcript_text
-                        logger.info(f"Audio transcription completed for company_id={company_id} (transcript length: {len(transcript_text)} characters)")
+                    transcript_raw = transcribe_audio(resolved_audio_path, file_content_hash=None, db=db)
+                    if transcript_raw:
+                        company.transcript_raw = transcript_raw
+                        # Clean the transcript
+                        from app.text_cleaning import clean_transcript
+                        transcript_clean = clean_transcript(transcript_raw)
+                        company.transcript_clean = transcript_clean
+                        # Keep legacy field for backward compatibility
+                        company.transcript_text = transcript_clean
+                        logger.info(f"Audio transcription completed for company_id={company_id} (raw: {len(transcript_raw)} chars, clean: {len(transcript_clean)} chars)")
                     else:
                         logger.warning(f"Audio transcription returned no text for company_id={company_id}")
             except Exception as e:
@@ -269,6 +292,7 @@ def process_company_background(company_id: int, website: str = None, audio_path:
 
         # Update status to done (website/audio processing complete)
         company.processing_status = "done"
+        company.updated_at = datetime.now(timezone.utc)
         db.commit()
         logger.info(f"Finished preprocessing for company_id={company_id}")
 
@@ -482,6 +506,60 @@ def get_companies_for_program(
     # Only return companies that belong to the current user
     return [c for c in funding_program.companies if c.user_email == current_user.email]
 
+
+@router.post("/companies", response_model=CompanyResponse, status_code=status.HTTP_201_CREATED)
+def create_company(
+    company_data: CompanyCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    Create a new company.
+    Background processing (website crawling and audio transcription) is triggered
+    after the response is returned.
+
+    Note: For file uploads, use the /upload-audio endpoint first, then provide the audio_path.
+    """
+    if not company_data.name or not company_data.name.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Company name is required"
+        )
+
+    # Create new company with initial processing status (owned by current user)
+    # Note: audio_path can now be either a file_id (UUID) or legacy path string
+    new_company = Company(
+        name=company_data.name.strip(),
+        website=company_data.website.strip() if company_data.website else None,
+        audio_path=company_data.audio_path.strip() if company_data.audio_path else None,  # Can be file_id or legacy path
+        processing_status="pending",
+        user_email=current_user.email
+    )
+
+    try:
+        db.add(new_company)
+        db.commit()
+        db.refresh(new_company)
+
+        # Schedule background processing
+        if new_company.website or new_company.audio_path:
+            background_tasks.add_task(
+                process_company_background,
+                company_id=new_company.id,
+                website=new_company.website,
+                audio_path=new_company.audio_path
+            )
+            logger.info(f"Company preprocessing task enqueued for company_id={new_company.id}")
+
+        return new_company
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create company: {str(e)}"
+        ) from e
+
 @router.get("/companies", response_model=List[CompanyResponse])
 def get_all_companies(
     db: Session = Depends(get_db),  # noqa: B008
@@ -655,3 +733,225 @@ def delete_company(
             detail="Failed to delete company"
         ) from e
 
+
+# Company Document Upload Endpoints
+
+@router.post("/companies/{company_id}/documents/upload", response_model=List[CompanyDocumentResponse])
+async def upload_company_documents(
+    company_id: int,
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    Upload multiple documents (PDFs, DOCX) for a company.
+    
+    - Accepts: PDF, DOCX files
+    - Extracts text and stores in DocumentTextCache
+    - Returns list of uploaded documents with their IDs
+    """
+    # Verify company exists and user owns it
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.user_email == current_user.email
+    ).first()
+
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found"
+        )
+
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files provided"
+        )
+
+    uploaded_documents = []
+
+    try:
+        for file in files:
+            # Read file content
+            content = await file.read()
+
+            # Determine file type
+            file_type = get_file_type_from_filename(file.filename or "unknown")
+
+            # Validate file type - only PDF and DOCX allowed
+            if file_type not in ["pdf", "docx"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported file type: {file_type}. Only PDF and DOCX files are allowed."
+                )
+
+            # Get or create file record (hash-based deduplication)
+            file_record, is_new = get_or_create_file(
+                db=db,
+                file_bytes=content,
+                file_type=file_type,
+                filename=file.filename
+            )
+
+            # Extract text for PDFs/DOCX (uses existing caching)
+            _ = extract_document_text(
+                file_bytes=content,
+                file_content_hash=file_record.content_hash,
+                file_type=file_type,
+                db=db
+            )
+
+            # Create CompanyDocument record
+            company_document = CompanyDocument(
+                company_id=company_id,
+                file_id=file_record.id,
+                original_filename=file.filename or "unknown",
+                uploaded_by=current_user.email
+            )
+
+            db.add(company_document)
+            uploaded_documents.append(company_document)
+
+            logger.info(f"Uploaded company document: {file.filename} (file_type: {file_type})")
+
+        db.commit()
+
+        # Refresh documents to get IDs
+        for doc in uploaded_documents:
+            db.refresh(doc)
+
+        # Build response
+        response_docs = []
+        for doc in uploaded_documents:
+            file_record = db.query(FileModel).filter(FileModel.id == doc.file_id).first()
+            has_text = False
+            if file_record:
+                if file_record.file_type in ["pdf", "docx"]:
+                    cached_text = get_cached_document_text(db, file_record.content_hash)
+                    has_text = cached_text is not None
+                elif file_record.file_type == "txt":
+                    has_text = True
+
+            response_docs.append(CompanyDocumentResponse(
+                id=str(doc.id),
+                company_id=doc.company_id,
+                file_id=str(doc.file_id),
+                original_filename=doc.original_filename,
+                display_name=doc.display_name,
+                uploaded_at=doc.uploaded_at,
+                file_type=file_record.file_type if file_record else "unknown",
+                file_size=file_record.size_bytes if file_record else 0,
+                has_extracted_text=has_text
+            ))
+
+        return response_docs
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error uploading documents for company_id={company_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload documents: {str(e)}"
+        ) from e
+
+
+@router.get("/companies/{company_id}/documents", response_model=CompanyDocumentListResponse)
+def get_company_documents(
+    company_id: int,
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    Get all documents for a company.
+    Returns document metadata including extracted text preview.
+    """
+    # Verify company exists and user owns it
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.user_email == current_user.email
+    ).first()
+
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found"
+        )
+
+    documents = db.query(CompanyDocument).filter(
+        CompanyDocument.company_id == company_id
+    ).all()
+
+    # Build response
+    response_docs = []
+    for doc in documents:
+        file_record = db.query(FileModel).filter(FileModel.id == doc.file_id).first()
+        has_text = False
+        if file_record:
+            if file_record.file_type in ["pdf", "docx"]:
+                cached_text = get_cached_document_text(db, file_record.content_hash)
+                has_text = cached_text is not None
+            elif file_record.file_type == "txt":
+                has_text = True
+
+        response_docs.append(CompanyDocumentResponse(
+            id=str(doc.id),
+            company_id=doc.company_id,
+            file_id=str(doc.file_id),
+            original_filename=doc.original_filename,
+            display_name=doc.display_name,
+            uploaded_at=doc.uploaded_at,
+            file_type=file_record.file_type if file_record else "unknown",
+            file_size=file_record.size_bytes if file_record else 0,
+            has_extracted_text=has_text
+        ))
+
+    return CompanyDocumentListResponse(documents=response_docs)
+
+
+@router.delete("/companies/{company_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_company_document(
+    company_id: int,
+    document_id: str,
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    Delete a company document.
+    Note: File record and storage remain (may be used by other documents).
+    """
+    # Verify company exists and user owns it
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.user_email == current_user.email
+    ).first()
+
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company not found"
+        )
+
+    # Find document
+    document = db.query(CompanyDocument).filter(
+        CompanyDocument.id == document_id,
+        CompanyDocument.company_id == company_id
+    ).first()
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+
+    try:
+        db.delete(document)
+        db.commit()
+        return None
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete document: {str(e)}"
+        ) from e

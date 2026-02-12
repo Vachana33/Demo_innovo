@@ -191,3 +191,20 @@ class FundingProgramDocumentResponse(BaseModel):
 class FundingProgramDocumentListResponse(BaseModel):
     documents: List[FundingProgramDocumentResponse]
     categories: dict[str, int]  # Category name -> count
+
+class CompanyDocumentResponse(BaseModel):
+    id: str  # UUID as string
+    company_id: int
+    file_id: str  # UUID as string
+    original_filename: str
+    display_name: Optional[str] = None
+    uploaded_at: datetime
+    file_type: str
+    file_size: int
+    has_extracted_text: bool
+
+    class Config:
+        from_attributes = True
+
+class CompanyDocumentListResponse(BaseModel):
+    documents: List[CompanyDocumentResponse]

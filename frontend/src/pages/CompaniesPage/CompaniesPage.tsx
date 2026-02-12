@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "../../contexts/AuthContext";
-import { apiGet, apiPost, apiPut, apiDelete, apiUploadFile } from "../../utils/api";
+import { apiGet, apiPost, apiPut, apiDelete, apiUploadFile, apiUploadFiles } from "../../utils/api";
 import styles from "./CompaniesPage.module.css";
 
 type Company = {
@@ -8,7 +8,21 @@ type Company = {
   name: string;
   website?: string;
   audio_path?: string;
+  processing_status?: string;
+  transcript_text?: string;
+  transcript_raw?: string;
+  transcript_clean?: string;
   created_at: string;
+};
+
+type CompanyDocument = {
+  id: string;
+  company_id: number;
+  original_filename: string;
+  file_type: string;
+  file_size: number;
+  has_extracted_text: boolean;
+  uploaded_at: string;
 };
 
 export default function CompaniesPage() {
@@ -26,6 +40,10 @@ export default function CompaniesPage() {
   const [formName, setFormName] = useState("");
   const [formWebsite, setFormWebsite] = useState("");
   const [formAudio, setFormAudio] = useState<File | null>(null);
+  const [formDocuments, setFormDocuments] = useState<File[]>([]);
+  const [companyDocuments, setCompanyDocuments] = useState<Record<number, CompanyDocument[]>>({});
+  const [isUploadingDocuments, setIsUploadingDocuments] = useState(false);
+  const [isLoadingDocuments, setIsLoadingDocuments] = useState<Record<number, boolean>>({});
 
   // Fetch companies
   useEffect(() => {
@@ -109,10 +127,27 @@ export default function CompaniesPage() {
         audio_path: audioPath,
       });
       setCompanies((prev) => prev.map((c) => (c.id === editingId ? updated : c)));
+      
+      // Upload documents if any were selected
+      if (formDocuments.length > 0) {
+        setIsUploadingDocuments(true);
+        try {
+          await apiUploadFiles(`/companies/${editingId}/documents/upload`, formDocuments);
+          // Refresh documents list
+          await fetchCompanyDocuments(editingId);
+        } catch (uploadError: unknown) {
+          console.error("Error uploading documents:", uploadError);
+          alert(uploadError instanceof Error ? uploadError.message : "Failed to upload documents");
+        } finally {
+          setIsUploadingDocuments(false);
+        }
+      }
+      
       setEditingId(null);
       setFormName("");
       setFormWebsite("");
       setFormAudio(null);
+      setFormDocuments([]);
       setShowDialog(false);
     } catch (error: unknown) {
       console.error("Error updating company:", error);
@@ -145,13 +180,30 @@ export default function CompaniesPage() {
     }
   }
 
+  // Fetch company documents
+  async function fetchCompanyDocuments(companyId: number) {
+    setIsLoadingDocuments((prev) => ({ ...prev, [companyId]: true }));
+    try {
+      const response = await apiGet<{ documents: CompanyDocument[] }>(`/companies/${companyId}/documents`);
+      setCompanyDocuments((prev) => ({ ...prev, [companyId]: response.documents || [] }));
+    } catch (error: unknown) {
+      console.error("Error fetching documents:", error);
+      setCompanyDocuments((prev) => ({ ...prev, [companyId]: [] }));
+    } finally {
+      setIsLoadingDocuments((prev) => ({ ...prev, [companyId]: false }));
+    }
+  }
+
   // Open edit dialog
-  function openEditDialog(company: Company) {
+  async function openEditDialog(company: Company) {
     setEditingId(company.id);
     setFormName(company.name);
     setFormWebsite(company.website || "");
     setFormAudio(null);
+    setFormDocuments([]);
     setShowDialog(true);
+    // Fetch documents for this company
+    await fetchCompanyDocuments(company.id);
   }
 
   return (
@@ -219,12 +271,28 @@ export default function CompaniesPage() {
                 </div>
               </div>
               {company.website && (
-                <p className={styles.cardWebsite}>{company.website}</p>
+                <a
+                  href={company.website.startsWith('http') ? company.website : `https://${company.website}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={styles.cardWebsite}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  🌐 {company.website}
+                </a>
               )}
               {company.audio_path && (
                 <div className={styles.cardMeta}>
                   <span className={styles.metaIcon}>🎙️</span>
-                  <span>Audio file attached</span>
+                  <span>
+                    {company.processing_status === "processing" 
+                      ? "Transcribing..." 
+                      : company.processing_status === "done" && company.transcript_clean
+                      ? "Transcript ready"
+                      : company.processing_status === "failed"
+                      ? "Transcription failed"
+                      : "Audio file attached"}
+                  </span>
                 </div>
               )}
             </div>
@@ -276,6 +344,38 @@ export default function CompaniesPage() {
                 onChange={(e) => setFormAudio(e.target.files?.[0] ?? null)}
                 className={styles.formFile}
               />
+              <label className={styles.formLabel}>Documents (optional)</label>
+              <input
+                type="file"
+                multiple
+                accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={(e) => {
+                  const files = Array.from(e.target.files || []);
+                  setFormDocuments(files);
+                }}
+                className={styles.formFile}
+              />
+              {formDocuments.length > 0 && (
+                <div style={{ marginTop: "0.5rem", fontSize: "0.9rem", color: "#666" }}>
+                  {formDocuments.length} file(s) selected
+                </div>
+              )}
+              {editingId && isLoadingDocuments[editingId] && (
+                    <div className={styles.loadingDocuments}>
+                  Loading documents...
+                </div>
+              )}
+
+              {editingId && companyDocuments[editingId] && companyDocuments[editingId].length > 0 && (
+                <div style={{ marginTop: "1rem", borderTop: "1px solid #ddd", paddingTop: "1rem" }}>
+                  <div style={{ fontWeight: 500, marginBottom: "0.5rem" }}>Existing Documents:</div>
+                  {companyDocuments[editingId].map((doc) => (
+                    <div key={doc.id} style={{ fontSize: "0.9rem", color: "#666", marginBottom: "0.25rem" }}>
+                      📄 {doc.original_filename} ({(doc.file_size / 1024).toFixed(1)} KB)
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className={styles.dialogActions}>
                 <button
                   type="button"
@@ -299,7 +399,9 @@ export default function CompaniesPage() {
                   {isCreating
                     ? "Creating..."
                     : isUpdating
-                    ? "Updating..."
+                    ? isUploadingDocuments
+                      ? "Updating & Uploading..."
+                      : "Updating..."
                     : editingId
                     ? "Update"
                     : "Create"}

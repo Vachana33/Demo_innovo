@@ -45,11 +45,17 @@ class Company(Base):
     name = Column(String, nullable=False)
     website = Column(String, nullable=True)
     audio_path = Column(String, nullable=True)
-    website_text = Column(String, nullable=True)  # Crawled website content
-    transcript_text = Column(String, nullable=True)  # Audio transcript
+    website_text = Column(String, nullable=True)  # Crawled website content (legacy, kept for backward compatibility)
+    transcript_text = Column(String, nullable=True)  # Audio transcript (legacy, kept for backward compatibility)
+    # New raw content fields
+    website_raw_text = Column(Text, nullable=True)  # Raw extracted website text
+    website_clean_text = Column(Text, nullable=True)  # Cleaned website text (navigation/boilerplate removed)
+    transcript_raw = Column(Text, nullable=True)  # Raw transcript from Whisper
+    transcript_clean = Column(Text, nullable=True)  # Cleaned transcript (filler words removed, normalized)
     processing_status = Column(String, nullable=True, server_default="pending")  # "pending", "processing", "done", "failed"
     processing_error = Column(String, nullable=True)  # Error message if processing failed
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     user_email = Column(String, ForeignKey("users.email"), nullable=False, index=True)
 
     # Structured company profile (Phase 2A: Extract → Store → Reference)
@@ -197,6 +203,31 @@ class FundingProgramDocument(Base):
     funding_program = relationship("FundingProgram", backref="funding_program_documents")
     file = relationship("File", backref="funding_program_documents")
     uploader = relationship("User", backref="uploaded_documents")
+
+class CompanyDocument(Base):
+    """
+    Documents uploaded for companies (PDFs, DOCX, etc.).
+    Links companies to files. Separate from funding program documents.
+    """
+    __tablename__ = "company_documents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    file_id = Column(UUID(as_uuid=True), ForeignKey("files.id"), nullable=False, index=True)
+    original_filename = Column(String, nullable=False)
+    display_name = Column(String, nullable=True)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    uploaded_by = Column(String, ForeignKey("users.email"), nullable=False)
+
+    # Composite index for efficient queries
+    __table_args__ = (
+        {"sqlite_autoincrement": True},
+    )
+
+    # Relationships
+    company = relationship("Company", backref="company_documents")
+    file = relationship("File", backref="company_documents")
+    uploader = relationship("User", backref="uploaded_company_documents")
 
 class FundingProgramGuidelinesSummary(Base):
     """
