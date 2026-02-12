@@ -32,7 +32,7 @@ from app.database import Base  # noqa: E402
 from app.models import (  # noqa: F401, E402
     User, FundingProgram, Company, Document, funding_program_companies,
     File, AudioTranscriptCache, WebsiteTextCache, DocumentTextCache,
-    FundingProgramDocument, UserTemplate
+    FundingProgramDocument, UserTemplate, FundingProgramGuidelinesSummary
 )
 
 # this is the Alembic Config object, which provides

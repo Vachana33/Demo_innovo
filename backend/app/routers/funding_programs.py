@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
 from sqlalchemy.orm import Session
+from sqlalchemy import delete, func, select
 from app.database import get_db
-from app.models import FundingProgram, User, FundingProgramDocument, File as FileModel
+from app.models import FundingProgram, User, FundingProgramDocument, File as FileModel, FundingProgramGuidelinesSummary, funding_program_companies
+from app.guidelines_processing import process_guidelines_for_funding_program
 from app.schemas import FundingProgramCreate, FundingProgramResponse, FundingProgramDocumentResponse, FundingProgramDocumentListResponse
 from app.dependencies import get_current_user
 from app.file_storage import get_or_create_file
@@ -39,9 +41,6 @@ def create_funding_program(
     new_program = FundingProgram(
         title=program_data.title.strip(),
         website=website_value,
-        template_source=program_data.template_source if program_data.template_source else None,
-        template_ref=program_data.template_ref if program_data.template_ref else None,
-        template_name=program_data.template_name if program_data.template_name else None,  # Legacy
         user_email=current_user.email
     )
 
@@ -113,9 +112,6 @@ def update_funding_program(
     if website_value == "":
         website_value = None
     funding_program.website = website_value
-    funding_program.template_source = program_data.template_source if program_data.template_source else None
-    funding_program.template_ref = program_data.template_ref if program_data.template_ref else None
-    funding_program.template_name = program_data.template_name if program_data.template_name else None  # Legacy
 
     try:
         db.commit()
@@ -148,21 +144,81 @@ def delete_funding_program(
             detail="Funding program not found"
         )
 
+    # Check if any companies are linked to this funding program
+    linked_companies_count = db.execute(
+        select(func.count()).select_from(funding_program_companies).where(
+            funding_program_companies.c.funding_program_id == funding_program_id
+        )
+    ).scalar() or 0
+    
+    if linked_companies_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete funding program because companies are linked to it."
+        )
+
     try:
-        # Delete all related funding_program_documents
-        db.query(FundingProgramDocument).filter(
-            FundingProgramDocument.funding_program_id == funding_program_id
-        ).delete()
+        # #region agent log
+        logger.info(f"[DELETE] Starting deletion of funding_program_id={funding_program_id}")
+        # #endregion
         
-        db.delete(funding_program)
+        # Delete all related funding_program_documents
+        try:
+            docs_deleted = db.query(FundingProgramDocument).filter(
+                FundingProgramDocument.funding_program_id == funding_program_id
+            ).delete()
+            # #region agent log
+            logger.info(f"[DELETE] Deleted {docs_deleted} funding_program_documents")
+            # #endregion
+        except Exception as docs_error:
+            # #region agent log
+            logger.error(f"[DELETE] Error deleting documents: {str(docs_error)}")
+            # #endregion
+            db.rollback()
+            raise
+        
+        # Delete guidelines summary if exists
+        try:
+            summary_deleted = db.query(FundingProgramGuidelinesSummary).filter(
+                FundingProgramGuidelinesSummary.funding_program_id == funding_program_id
+            ).delete()
+            # #region agent log
+            logger.info(f"[DELETE] Deleted {summary_deleted} guidelines_summary records")
+            # #endregion
+        except Exception as summary_error:
+            # #region agent log
+            logger.warning(f"[DELETE] Error deleting guidelines_summary (may not exist): {str(summary_error)}")
+            # #endregion
+            # Check if it's a table doesn't exist error - if so, continue; otherwise rollback
+            error_str = str(summary_error).lower()
+            if "does not exist" not in error_str and "no such table" not in error_str and "relation" not in error_str:
+                # Real error - rollback and raise
+                db.rollback()
+                raise
+        
+        # Delete the funding program itself using direct query to avoid relationship access
+        # This prevents SQLAlchemy from trying to lazy-load the companies relationship
+        program_deleted = db.query(FundingProgram).filter(
+            FundingProgram.id == funding_program_id
+        ).delete()
+        # #region agent log
+        logger.info(f"[DELETE] Deleted {program_deleted} funding_program record, committing...")
+        # #endregion
+        
         db.commit()
+        # #region agent log
+        logger.info(f"[DELETE] Successfully deleted funding_program_id={funding_program_id}")
+        # #endregion
         return None
-    except Exception:
+    except Exception as e:
+        # #region agent log
+        logger.error(f"[DELETE] Error deleting funding_program_id={funding_program_id}: {str(e)}", exc_info=True)
+        # #endregion
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete funding program"
-        ) from None
+            detail=f"Failed to delete funding program: {str(e)}"
+        ) from e
 
 
 
@@ -253,6 +309,13 @@ async def upload_funding_program_guidelines(
         # Refresh documents to get IDs
         for doc in uploaded_documents:
             db.refresh(doc)
+
+        # Process guidelines and generate rules summary
+        try:
+            process_guidelines_for_funding_program(funding_program_id, db)
+        except Exception as e:
+            logger.error(f"Error processing guidelines for funding_program_id={funding_program_id}: {str(e)}")
+            # Don't fail the upload if processing fails
 
         # Build response
         response_docs = []
@@ -596,6 +659,14 @@ def delete_funding_program_document(
     # Delete document record
     db.delete(document)
     db.commit()
+
+    # Reprocess guidelines if this was a guidelines document
+    if document.category == "guidelines":
+        try:
+            process_guidelines_for_funding_program(funding_program_id, db)
+        except Exception as e:
+            logger.error(f"Error reprocessing guidelines after deletion for funding_program_id={funding_program_id}: {str(e)}")
+            # Don't fail the deletion if processing fails
 
     logger.info(f"Deleted funding program document: {document_id}")
 

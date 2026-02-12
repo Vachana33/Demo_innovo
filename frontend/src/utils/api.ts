@@ -190,6 +190,70 @@ export async function apiUploadFile(
 }
 
 /**
+ * Upload multiple files with authentication.
+ * Used for guidelines document uploads and other multi-file uploads.
+ * Sends files with field name "files" in multipart/form-data.
+ */
+export async function apiUploadFiles(
+  endpoint: string,
+  files: File[]
+): Promise<Record<string, unknown>> {
+  // #region agent log
+  debugLog("api.ts:apiUploadFiles:ENTRY", "Multiple file upload started", { endpoint, fileCount: files.length }, "F");
+  // #endregion
+  const token = getAuthToken();
+  const formData = new FormData();
+
+  // Append all files with field name "files"
+  files.forEach((file) => {
+    formData.append("files", file);
+  });
+
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  // Note: Do NOT set Content-Type header - browser will set it automatically with boundary for FormData
+
+  try {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method: "POST",
+      headers,
+      body: formData,
+    });
+
+    // #region agent log
+    debugLog("api.ts:apiUploadFiles:AFTER_FETCH", "Upload response received", { status: response.status, endpoint }, "F");
+    // #endregion
+
+    if (response.status === 401) {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      localStorage.removeItem(USER_EMAIL_KEY);
+      throw new Error("AUTH_EXPIRED");
+    }
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      // #region agent log
+      debugLog("api.ts:apiUploadFiles:ERROR", "Upload failed", { status: response.status, error: data?.detail || data?.message || 'Upload failed', endpoint }, "F");
+      // #endregion
+      throw new Error(data.detail || data.message || "Upload failed");
+    }
+
+    // #region agent log
+    debugLog("api.ts:apiUploadFiles:SUCCESS", "Multiple file upload succeeded", { endpoint }, "F");
+    // #endregion
+    return data;
+  } catch (error) {
+    // #region agent log
+    debugLog("api.ts:apiUploadFiles:EXCEPTION", "Upload exception", { error: String(error), errorType: error instanceof Error ? error.constructor.name : 'unknown', endpoint }, "F");
+    // #endregion
+    throw error;
+  }
+}
+
+/**
  * Download a file (returns blob response).
  * Used for PDF/DOCX exports.
  */

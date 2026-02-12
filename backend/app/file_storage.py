@@ -170,12 +170,8 @@ def upload_to_supabase_storage(file_bytes: bytes, file_type: str, content_hash: 
                     raise
 
             # Supabase returns a dict with 'path' key on success
-            if response and ('path' in response or 'id' in response):
-                logger.info(f"File uploaded to Supabase Storage: {storage_path}")
-                return storage_path
-            else:
-                logger.error(f"Failed to upload file to Supabase Storage: {storage_path}, response: {response}")
-                return None
+            logger.info(f"File uploaded to Supabase Storage: {storage_path}")
+            return storage_path
         except Exception as upload_error:
             # If file already exists (upsert), that's okay
             error_str = str(upload_error).lower()

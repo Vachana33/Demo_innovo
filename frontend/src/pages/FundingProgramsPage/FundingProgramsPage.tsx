@@ -1,21 +1,14 @@
 import { useState, useEffect } from "react";
 
 import { useAuth } from "../../contexts/AuthContext";
-import { apiGet, apiPost, apiPut, apiDelete } from "../../utils/api";
+import { apiGet, apiPost, apiPut, apiDelete, apiUploadFiles } from "../../utils/api";
 import styles from "./FundingProgramsPage.module.css";
 
 type FundingProgram = {
   id: number;
   title: string;
   website?: string;
-  description?: string;
   created_at: string;
-  template_name?: string;
-  template_source?: "system" | "user";
-  template_ref?: string;
-  sections_json?: Array<Record<string, unknown>>;
-  content_hash?: string;
-  last_scraped_at?: string;
 };
 
 export default function FundingProgramsPage() {
@@ -30,10 +23,13 @@ export default function FundingProgramsPage() {
   const [isCreating, setIsCreating] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [scrapingId, setScrapingId] = useState<number | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [openMenuId, setOpenMenuId] = useState<number | null>(null);
 
   const [formTitle, setFormTitle] = useState("");
   const [formWebsite, setFormWebsite] = useState("");
+  const [formFiles, setFormFiles] = useState<File[]>([]);
+  const [existingDocuments, setExistingDocuments] = useState<Array<{id: string; original_filename: string; file_type: string; file_size: number}>>([]);
 
   // Fetch programs
   useEffect(() => {
@@ -60,7 +56,6 @@ export default function FundingProgramsPage() {
     const searchLower = searchTerm.toLowerCase();
     return (
       p.title.toLowerCase().includes(searchLower) ||
-      (p.description && p.description.toLowerCase().includes(searchLower)) ||
       (p.website && p.website.toLowerCase().includes(searchLower))
     );
   });
@@ -77,8 +72,33 @@ export default function FundingProgramsPage() {
         website: formWebsite.trim() || undefined,
       });
       setPrograms((prev) => [created, ...prev]);
+      
+      // Upload files if any were selected
+      if (formFiles.length > 0) {
+        setIsUploading(true);
+        try {
+          // Filter to only PDF and DOCX files
+          const validFiles = formFiles.filter(
+            (file) => file.type === "application/pdf" || 
+                     file.name.toLowerCase().endsWith(".pdf") ||
+                     file.name.toLowerCase().endsWith(".docx") ||
+                     file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          );
+          
+          if (validFiles.length > 0) {
+            await apiUploadFiles(`/funding-programs/${created.id}/guidelines/upload`, validFiles);
+          }
+        } catch (uploadError: unknown) {
+          console.error("Error uploading files:", uploadError);
+          alert(uploadError instanceof Error ? uploadError.message : "Failed to upload files");
+        } finally {
+          setIsUploading(false);
+        }
+      }
+      
       setFormTitle("");
       setFormWebsite("");
+      setFormFiles([]);
       setShowDialog(false);
     } catch (error: unknown) {
       console.error("Error creating program:", error);
@@ -103,9 +123,35 @@ export default function FundingProgramsPage() {
         website: formWebsite.trim() || undefined,
       });
       setPrograms((prev) => prev.map((p) => (p.id === editingId ? updated : p)));
+      
+      // Upload new files if any were selected
+      if (formFiles.length > 0) {
+        setIsUploading(true);
+        try {
+          // Filter to only PDF and DOCX files
+          const validFiles = formFiles.filter(
+            (file) => file.type === "application/pdf" || 
+                     file.name.toLowerCase().endsWith(".pdf") ||
+                     file.name.toLowerCase().endsWith(".docx") ||
+                     file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          );
+          
+          if (validFiles.length > 0) {
+            await apiUploadFiles(`/funding-programs/${editingId}/guidelines/upload`, validFiles);
+          }
+        } catch (uploadError: unknown) {
+          console.error("Error uploading files:", uploadError);
+          alert(uploadError instanceof Error ? uploadError.message : "Failed to upload files");
+        } finally {
+          setIsUploading(false);
+        }
+      }
+      
       setEditingId(null);
       setFormTitle("");
       setFormWebsite("");
+      setFormFiles([]);
+      setExistingDocuments([]);
       setShowDialog(false);
     } catch (error: unknown) {
       console.error("Error updating program:", error);
@@ -138,32 +184,26 @@ export default function FundingProgramsPage() {
     }
   }
 
-  // Refresh program data
-  async function handleRefresh(programId: number) {
-    try {
-      setScrapingId(programId);
-      const updated = await apiPost<FundingProgram>(
-        `/funding-programs/${programId}/refresh`
-      );
-      setPrograms((prev) => prev.map((p) => (p.id === programId ? updated : p)));
-      alert("Data refreshed successfully!");
-    } catch (error: unknown) {
-      console.error("Error refreshing program:", error);
-      alert(error instanceof Error ? error.message : "Failed to refresh data");
-      if (error instanceof Error && error.message.includes("Authentication required")) {
-        logout();
-      }
-    } finally {
-      setScrapingId(null);
-    }
-  }
-
   // Open edit dialog
-  function openEditDialog(program: FundingProgram) {
+  async function openEditDialog(program: FundingProgram) {
     setEditingId(program.id);
     setFormTitle(program.title);
     setFormWebsite(program.website || "");
+    setFormFiles([]);
+    setExistingDocuments([]);
+    setOpenMenuId(null);
     setShowDialog(true);
+    
+    // Fetch existing guidelines documents
+    try {
+      const response = await apiGet<{documents: Array<{id: string; original_filename: string; file_type: string; file_size: number}>}>(
+        `/funding-programs/${program.id}/documents?category=guidelines`
+      );
+      setExistingDocuments(response.documents || []);
+    } catch (error: unknown) {
+      console.error("Error fetching documents:", error);
+      // Don't show error to user - just continue without documents
+    }
   }
 
   // Format date
@@ -175,6 +215,20 @@ export default function FundingProgramsPage() {
       year: "numeric",
     });
   }
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside() {
+
+      if (openMenuId !== null) {
+        setOpenMenuId(null);
+      }
+    }
+    if (openMenuId !== null) {
+      document.addEventListener("click", handleClickOutside);
+      return () => document.removeEventListener("click", handleClickOutside);
+    }
+  }, [openMenuId]);
 
   return (
     <div className={styles.container}>
@@ -190,6 +244,8 @@ export default function FundingProgramsPage() {
             setEditingId(null);
             setFormTitle("");
             setFormWebsite("");
+            
+            setFormFiles([]);
             setShowDialog(true);
           }}
           className={styles.newButton}
@@ -222,42 +278,44 @@ export default function FundingProgramsPage() {
             <div key={program.id} className={styles.programCard}>
               <div className={styles.cardHeader}>
                 <h3 className={styles.cardTitle}>{program.title}</h3>
+                <p>{formatDate(program.created_at)}</p>
+
                 <div className={styles.cardActions}>
-                  {program.website && (
-                    <button
-                      onClick={() => handleRefresh(program.id)}
-                      className={styles.refreshButton}
-                      disabled={scrapingId === program.id}
-                      title="Refresh data"
-                    >
-                      {scrapingId === program.id ? "⏳" : "🔄"}
-                    </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenMenuId(openMenuId === program.id ? null : program.id);
+                    }}
+                    className={styles.menuButton}
+                    title="More options"
+                  >
+                    ⋮
+                  </button>
+                  {openMenuId === program.id && (
+                    <div className={styles.menuDropdown}>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditDialog(program);
+                        }}
+                        className={styles.menuItem}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeletingId(program.id);
+                          setOpenMenuId(null);
+                        }}
+                        className={styles.menuItem}
+                      >
+                        Delete
+                      </button>
+                    </div>
                   )}
-                  <button
-                    onClick={() => openEditDialog(program)}
-                    className={styles.editButton}
-                    title="Edit"
-                  >
-                    ✏️
-                  </button>
-                  <button
-                    onClick={() => setDeletingId(program.id)}
-                    className={styles.deleteButton}
-                    title="Delete"
-                  >
-                    🗑️
-                  </button>
                 </div>
               </div>
-              {program.description && (
-                <p className={styles.cardDescription}>{program.description}</p>
-              )}
-              {program.last_scraped_at && (
-                <div className={styles.cardMeta}>
-                  <span className={styles.metaIcon}>📅</span>
-                  <span>Last updated: {formatDate(program.last_scraped_at)}</span>
-                </div>
-              )}
               {program.website && (
                 <a
                   href={program.website}
@@ -283,6 +341,7 @@ export default function FundingProgramsPage() {
             setEditingId(null);
             setFormTitle("");
             setFormWebsite("");
+            setFormFiles([]);
           }}
         >
           <div
@@ -310,6 +369,37 @@ export default function FundingProgramsPage() {
                 className={styles.formInput}
                 placeholder="https://..."
               />
+              <label className={styles.formLabel}>Guidelines Documents (optional)</label>
+              {editingId && existingDocuments.length > 0 && (
+                <div className={styles.fileList}>
+                  <div style={{ marginBottom: "0.5rem", fontWeight: 500 }}>Existing documents:</div>
+                  {existingDocuments.map((doc) => (
+                    <div key={doc.id} className={styles.fileItem}>
+                      📄 {doc.original_filename} ({(doc.file_size / 1024).toFixed(1)} KB)
+                    </div>
+                  ))}
+                </div>
+              )}
+              <input
+                type="file"
+                multiple
+                accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={(e) => {
+                  const files = Array.from(e.target.files || []);
+                  setFormFiles(files);
+                }}
+                className={styles.formInput}
+              />
+              {formFiles.length > 0 && (
+                <div className={styles.fileList}>
+                  <div style={{ marginBottom: "0.5rem", fontWeight: 500 }}>New files to upload:</div>
+                  {formFiles.map((file, idx) => (
+                    <div key={idx} className={styles.fileItem}>
+                      📄 {file.name} ({(file.size / 1024).toFixed(1)} KB)
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className={styles.dialogActions}>
                 <button
                   type="button"
@@ -318,19 +408,23 @@ export default function FundingProgramsPage() {
                     setEditingId(null);
                     setFormTitle("");
                     setFormWebsite("");
+                   
+                    setFormFiles([]);
                   }}
                   className={styles.cancelButton}
-                  disabled={isCreating || isUpdating}
+                  disabled={isCreating || isUpdating || isUploading}
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   className={styles.submitButton}
-                  disabled={isCreating || isUpdating}
+                  disabled={isCreating || isUpdating || isUploading}
                 >
                   {isCreating
                     ? "Creating..."
+                    : isUploading
+                    ? "Uploading..."
                     : isUpdating
                     ? "Updating..."
                     : editingId

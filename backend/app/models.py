@@ -28,13 +28,6 @@ class FundingProgram(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     user_email = Column(String, ForeignKey("users.email"), nullable=False, index=True)
 
-    # Template name for document template resolution (legacy)
-    template_name = Column(String, nullable=True)  # e.g., "wtt_v1"
-
-    # Phase 2.5: Template system fields
-    template_source = Column(String, nullable=True, index=True)  # "system" | "user"
-    template_ref = Column(String, nullable=True, index=True)  # System template name or user template UUID
-
     # Relationship to user (owner)
     user = relationship("User", back_populates="funding_programs")
 
@@ -204,3 +197,20 @@ class FundingProgramDocument(Base):
     funding_program = relationship("FundingProgram", backref="funding_program_documents")
     file = relationship("File", backref="funding_program_documents")
     uploader = relationship("User", backref="uploaded_documents")
+
+class FundingProgramGuidelinesSummary(Base):
+    """
+    Structured rules extracted from funding program guideline documents.
+    One summary per funding program, regenerated when guideline files change.
+    """
+    __tablename__ = "funding_program_guidelines_summary"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    funding_program_id = Column(Integer, ForeignKey("funding_programs.id"), nullable=False, unique=True, index=True)
+    rules_json = Column(JSON, nullable=False)  # Structured rules extracted from guidelines
+    source_file_hash = Column(Text, nullable=False)  # Combined hash of all guideline files
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationships
+    funding_program = relationship("FundingProgram", backref="guidelines_summary")

@@ -61,17 +61,11 @@ class PasswordReset(BaseModel):
 class FundingProgramCreate(BaseModel):
     title: str
     website: Optional[str] = None
-    template_name: Optional[str] = None  # Legacy
-    template_source: Optional[str] = None  # "system" | "user"
-    template_ref: Optional[str] = None  # System template name or user template UUID
 
 class FundingProgramResponse(BaseModel):
     id: int
     title: str
     website: Optional[str] = None
-    template_name: Optional[str] = None  # Legacy
-    template_source: Optional[str] = None
-    template_ref: Optional[str] = None
     created_at: datetime
 
     class Config:

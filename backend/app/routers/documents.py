@@ -996,6 +996,7 @@ def _generate_batch_content(
     transcript_text: str,
     company_profile: Optional[Dict[str, Any]] = None,
     company_id: Optional[int] = None,
+    funding_program_rules: Optional[Dict[str, Any]] = None,
     max_retries: int = 2
 ) -> dict:
     """
@@ -1048,6 +1049,30 @@ def _generate_batch_content(
     # Do NOT reuse this prompt for chat-based editing.
     # For editing existing content, use _generate_section_content() instead.
 
+    # Build rules context from funding program guidelines
+    rules_context = ""
+    if funding_program_rules:
+        rules_parts = []
+        if funding_program_rules.get("eligibility_rules"):
+            rules_parts.append(f"Berechtigungskriterien:\n" + "\n".join(f"- {r}" for r in funding_program_rules["eligibility_rules"]))
+        if funding_program_rules.get("required_sections"):
+            rules_parts.append(f"Erforderliche Abschnitte:\n" + "\n".join(f"- {r}" for r in funding_program_rules["required_sections"]))
+        if funding_program_rules.get("forbidden_content"):
+            rules_parts.append(f"Verbotene Inhalte:\n" + "\n".join(f"- {r}" for r in funding_program_rules["forbidden_content"]))
+        if funding_program_rules.get("formal_requirements"):
+            rules_parts.append(f"Formale Anforderungen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["formal_requirements"]))
+        if funding_program_rules.get("evaluation_criteria"):
+            rules_parts.append(f"Bewertungskriterien:\n" + "\n".join(f"- {r}" for r in funding_program_rules["evaluation_criteria"]))
+        if funding_program_rules.get("funding_limits"):
+            rules_parts.append(f"Fördergrenzen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["funding_limits"]))
+        if funding_program_rules.get("deadlines"):
+            rules_parts.append(f"Fristen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["deadlines"]))
+        if funding_program_rules.get("important_notes"):
+            rules_parts.append(f"Wichtige Hinweise:\n" + "\n".join(f"- {r}" for r in funding_program_rules["important_notes"]))
+        
+        if rules_parts:
+            rules_context = "\n\nFÖRDERRICHTLINIEN:\n" + "\n\n".join(rules_parts) + "\n\n"
+
     # Build prompt with PDF style reference instructions
     prompt = f"""Sie sind ein Expertenberater, der bei der Erstellung einer "Vorhabensbeschreibung" für einen Förderantrag hilft.
 
@@ -1067,13 +1092,14 @@ KRITISCH:
 - Erwähnen Sie diese PDFs NICHT im generierten Text
 - Alle faktischen Inhalte müssen AUSSCHLIESSLICH aus den untenstehenden Firmeninformationen stammen
 
-Firmeninformationen:
+{rules_context}Firmeninformationen:
 {company_context}
 
 Die folgenden Abschnitte müssen generiert werden:
 {headings_text}
 
 Generieren Sie für jeden Abschnitt detaillierte, professionelle Inhalte basierend AUSSCHLIESSLICH auf den oben genannten Firmeninformationen.
+{rules_context and "WICHTIG: Beachten Sie die Förderrichtlinien bei der Generierung. Stellen Sie sicher, dass alle erforderlichen Aspekte abgedeckt werden und verbotene Inhalte vermieden werden." or ""}
 
 SPRACHE UND STIL:
 - Schreiben Sie AUSSCHLIESSLICH auf Deutsch
@@ -1261,6 +1287,17 @@ def generate_content(
     transcript_text = company.transcript_text or ""
     company_profile = company.company_profile  # Phase 2D: Use structured profile if available
 
+    # Get funding program rules if document has funding_program_id
+    funding_program_rules = None
+    if document.funding_program_id:
+        from app.models import FundingProgramGuidelinesSummary
+        summary = db.query(FundingProgramGuidelinesSummary).filter(
+            FundingProgramGuidelinesSummary.funding_program_id == document.funding_program_id
+        ).first()
+        if summary:
+            funding_program_rules = summary.rules_json
+            logger.info(f"Using funding program rules for funding_program_id={document.funding_program_id}")
+
     # Filter out milestone tables from content generation (they should not be AI-generated)
     text_sections = [s for s in sections if s.get("type") != "milestone_table"]
     milestone_sections = [s for s in sections if s.get("type") == "milestone_table"]
@@ -1297,6 +1334,7 @@ def generate_content(
                 transcript_text=transcript_text,
                 company_profile=company_profile,  # Phase 2D: Pass structured profile
                 company_id=company.id,  # Guardrail A: Pass company_id for logging
+                funding_program_rules=funding_program_rules,
                 max_retries=2
             )
 

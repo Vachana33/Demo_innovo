@@ -103,29 +103,57 @@
 .cardActions {
   display: flex;
   gap: 0.5rem;
+  position: relative;
 }
 
-.refreshButton,
-.editButton,
-.deleteButton {
+.menuButton {
   background: none;
   border: none;
   font-size: 1.2rem;
   cursor: pointer;
-  padding: 0.25rem;
+  padding: 0.25rem 0.5rem;
   opacity: 0.7;
   transition: opacity 0.2s;
+  color: var(--brand-text-dark);
 }
 
-.refreshButton:hover,
-.editButton:hover,
-.deleteButton:hover {
+.menuButton:hover {
   opacity: 1;
 }
 
-.refreshButton:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.menuDropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background-color: #fff;
+  border: 1px solid var(--brand-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 100;
+  min-width: 120px;
+  margin-top: 0.25rem;
+  overflow: hidden;
+}
+
+.menuItem {
+  display: block;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: 0.9rem;
+  color: var(--brand-text-dark);
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.menuItem:hover {
+  background-color: var(--brand-bg-light);
+}
+
+.menuItem:not(:last-child) {
+  border-bottom: 1px solid var(--brand-border);
 }
 
 .cardDescription {
@@ -290,4 +318,20 @@
 .deleteConfirmButton:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.fileList {
+  margin-top: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background-color: var(--brand-bg-light);
+  border-radius: 6px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.fileItem {
+  font-size: 0.85rem;
+  color: var(--brand-text-medium);
+  padding: 0.25rem 0;
 }
