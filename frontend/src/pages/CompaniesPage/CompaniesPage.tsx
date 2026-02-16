@@ -36,6 +36,7 @@ export default function CompaniesPage() {
   const [isCreating, setIsCreating] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [openMenuId, setOpenMenuId] = useState<number | null>(null);
 
   const [formName, setFormName] = useState("");
   const [formWebsite, setFormWebsite] = useState("");
@@ -201,10 +202,24 @@ export default function CompaniesPage() {
     setFormWebsite(company.website || "");
     setFormAudio(null);
     setFormDocuments([]);
+    setOpenMenuId(null);
     setShowDialog(true);
     // Fetch documents for this company
     await fetchCompanyDocuments(company.id);
   }
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside() {
+      if (openMenuId !== null) {
+        setOpenMenuId(null);
+      }
+    }
+    if (openMenuId !== null) {
+      document.addEventListener("click", handleClickOutside);
+      return () => document.removeEventListener("click", handleClickOutside);
+    }
+  }, [openMenuId]);
 
   return (
     <div className={styles.container}>
@@ -255,19 +270,38 @@ export default function CompaniesPage() {
                 <h3 className={styles.cardTitle}>{company.name}</h3>
                 <div className={styles.cardActions}>
                   <button
-                    onClick={() => openEditDialog(company)}
-                    className={styles.editButton}
-                    title="Edit"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenMenuId(openMenuId === company.id ? null : company.id);
+                    }}
+                    className={styles.menuButton}
+                    title="More options"
                   >
-                    ✏️
+                    ⋮
                   </button>
-                  <button
-                    onClick={() => setDeletingId(company.id)}
-                    className={styles.deleteButton}
-                    title="Delete"
-                  >
-                    🗑️
-                  </button>
+                  {openMenuId === company.id && (
+                    <div className={styles.menuDropdown}>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditDialog(company);
+                        }}
+                        className={styles.menuItem}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeletingId(company.id);
+                          setOpenMenuId(null);
+                        }}
+                        className={styles.menuItem}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
               {company.website && (
@@ -275,10 +309,10 @@ export default function CompaniesPage() {
                   href={company.website.startsWith('http') ? company.website : `https://${company.website}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className={styles.cardWebsite}
-                  onClick={(e) => e.stopPropagation()}
+                  className={styles.visitButton}
                 >
-                  🌐 {company.website}
+                  <span className={styles.visitIcon}>🌐</span>
+                  Visit Website
                 </a>
               )}
               {company.audio_path && (

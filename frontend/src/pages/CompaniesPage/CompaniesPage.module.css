@@ -267,3 +267,87 @@
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+
+/* Add these new styles */
+
+.menuButton {
+  background: none;
+  border: none;
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+  color: var(--brand-text-dark);
+}
+
+.menuButton:hover {
+  opacity: 1;
+}
+
+.menuDropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background-color: #fff;
+  border: 1px solid var(--brand-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 100;
+  min-width: 120px;
+  margin-top: 0.25rem;
+  overflow: hidden;
+}
+
+.menuItem {
+  display: block;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background: none;
+  border: none;
+  text-align: left;
+  font-size: 0.9rem;
+  color: var(--brand-text-dark);
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.menuItem:hover {
+  background-color: var(--brand-bg-light);
+}
+
+.menuItem:not(:last-child) {
+  border-bottom: 1px solid var(--brand-border);
+}
+
+/* Update this existing class to include position: relative */
+.cardActions {
+  display: flex;
+  gap: 0.5rem;
+  position: relative;
+}
+
+/* Add these for the new button style */
+.visitButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: var(--brand-bg-light);
+  border: 1px solid var(--brand-border);
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--brand-text-dark);
+  font-size: 0.9rem;
+  transition: background-color 0.2s;
+  align-self: flex-start;
+}
+
+.visitButton:hover {
+  background-color: var(--brand-gold-light);
+}
+
+.visitIcon {
+  font-size: 1rem;
+}
