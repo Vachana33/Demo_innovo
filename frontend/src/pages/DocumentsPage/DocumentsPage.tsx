@@ -51,6 +51,7 @@ export default function DocumentsPage() {
   const [formCompanyId, setFormCompanyId] = useState<number | null>(null);
   const [formProgramId, setFormProgramId] = useState<number | null>(null);
   const [formTemplate, setFormTemplate] = useState<string>("");
+  const [userTemplates, setUserTemplates] = useState<Array<{ id: string; name: string }>>([]);
 
   // Fetch data
   useEffect(() => {
@@ -63,10 +64,11 @@ export default function DocumentsPage() {
         // #region agent log
         debugLog("DocumentsPage.tsx:fetchData:BEFORE_API", "About to call APIs", {}, "D");
         // #endregion
-        const [documentsData, companiesData, programsData] = await Promise.all([
+        const [documentsData, companiesData, programsData, userTemplatesData] = await Promise.all([
           apiGet<DocumentListItem[]>("/documents"),
           apiGet<Company[]>("/companies"),
           apiGet<FundingProgram[]>("/funding-programs"),
+          apiGet<Array<{ id: string; name: string }>>("/user-templates").catch(() => []),
         ]);
         
         // #region agent log
@@ -98,6 +100,7 @@ export default function DocumentsPage() {
         setDocuments(mappedDocuments);
         setCompanies(companiesData);
         setFundingPrograms(programsData);
+        setUserTemplates(userTemplatesData || []);
         // #region agent log
         debugLog("DocumentsPage.tsx:fetchData:SUCCESS", "Data fetch succeeded", {}, "D");
         // #endregion
@@ -352,7 +355,18 @@ export default function DocumentsPage() {
                 className={styles.formSelect}
               >
                 <option value="">Select template</option>
-                <option value="wtt_v1">WTT v1</option>
+                <optgroup label="System Templates">
+                  <option value="wtt_v1">WTT v1</option>
+                </optgroup>
+                {userTemplates.length > 0 && (
+                  <optgroup label="My Templates">
+                    {userTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
               <div className={styles.dialogActions}>
                 <button

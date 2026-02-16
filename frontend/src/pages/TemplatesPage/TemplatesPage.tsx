@@ -89,10 +89,73 @@ export default function TemplatesPage() {
     }
   }
 
-  // Copy template content (placeholder - would need implementation)
-  function handleCopyContent(template: SystemTemplate | UserTemplate) {
-    // This would copy the template structure to clipboard or show it
-    alert(`Template "${template.name}" content would be copied here.`);
+  // Copy template content to clipboard
+  async function handleCopyContent(template: SystemTemplate | UserTemplate) {
+    try {
+      let sections: Array<Record<string, unknown>> = [];
+      let templateName = template.name;
+      
+      // Check if we already have sections in the template object
+      if ("template_structure" in template && template.template_structure) {
+        sections = template.template_structure.sections || [];
+      } else if ("sections" in template && Array.isArray(template.sections)) {
+        sections = template.sections;
+      }
+
+      // If we don't have sections, fetch them based on template type
+      if (sections.length === 0) {
+        if (template.source === "system") {
+          // Fetch system template
+          try {
+            const fullTemplate = await apiGet<{ template_name: string; sections: Array<Record<string, unknown>> }>(
+              `/templates/system/${template.id}`
+            );
+            sections = fullTemplate.sections || [];
+            templateName = fullTemplate.template_name || template.name;
+          } catch (error) {
+            console.error("Error fetching system template:", error);
+            alert("Could not fetch system template content. Please try again.");
+            return;
+          }
+        } else if (template.source === "user" && "id" in template && template.id) {
+          // Fetch user template
+          try {
+            const fullTemplate = await apiGet<{ name: string; template_structure: { sections: Array<Record<string, unknown>> } }>(
+              `/user-templates/${template.id}`
+            );
+            sections = fullTemplate.template_structure?.sections || [];
+            templateName = fullTemplate.name || template.name;
+          } catch (error) {
+            console.error("Error fetching user template:", error);
+            alert("Could not fetch template content. Please try again.");
+            return;
+          }
+        }
+      }
+
+      // If we still don't have sections, show error
+      if (sections.length === 0) {
+        alert("Template has no sections to copy.");
+        return;
+      }
+
+      // Copy sections as JSON
+      const templateData = {
+        name: templateName,
+        sections: sections.map((s: Record<string, unknown>) => ({
+          id: s.id,
+          title: s.title || s.name,
+          content: s.content || "",
+          type: s.type || "text"
+        }))
+      };
+      const jsonString = JSON.stringify(templateData, null, 2);
+      await navigator.clipboard.writeText(jsonString);
+      alert(`Template "${templateName}" content copied to clipboard! You can paste it when creating a new template.`);
+    } catch (error) {
+      console.error("Error copying template:", error);
+      alert("Failed to copy template content. Please try again.");
+    }
   }
 
   // Get sections preview
