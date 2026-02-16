@@ -103,6 +103,22 @@ export default function EditorPage() {
   
   // Store query parameters for document fetching
   const documentQueryParamsRef = useRef<{ funding_program_id?: string; template_id?: string; template_name?: string }>({});
+  
+  // Debug: Log preview state changes
+  useEffect(() => {
+    console.log("[PREVIEW STATE CHANGE] previewContent:", previewContent ? Object.keys(previewContent) : null);
+    console.log("[PREVIEW STATE CHANGE] previewSectionIds:", previewSectionIds);
+    if (previewContent && previewSectionIds.length > 0) {
+      console.log("[PREVIEW STATE] Preview is ACTIVE:", {
+        sectionIds: previewSectionIds,
+        contentKeys: Object.keys(previewContent),
+        hasContent: previewSectionIds.every(id => previewContent[id] && previewContent[id].length > 0),
+        contentLengths: previewSectionIds.map(id => ({ id, length: previewContent[id]?.length || 0 }))
+      });
+    } else {
+      console.log("[PREVIEW STATE] Preview is INACTIVE or empty");
+    }
+  }, [previewContent, previewSectionIds]);
 
   const [showExportMenu, setShowExportMenu] = useState(false);
 
@@ -881,6 +897,17 @@ export default function EditorPage() {
       try {
         console.log(`Fetching updated document after confirming ${updatedSectionIds.length} section(s)`);
         
+        // Validate companyIdNum
+        if (!companyIdNum) {
+          console.error("Cannot fetch updated document: companyIdNum is null");
+          clearPreview();
+          setChatMessages(prev => [...prev, {
+            role: "assistant",
+            text: "Fehler: Unternehmen-ID fehlt. Bitte aktualisieren Sie die Seite."
+          }]);
+          return;
+        }
+        
         // Build URL with stored query parameters
         const params = new URLSearchParams();
         if (documentQueryParamsRef.current.funding_program_id) {
@@ -895,6 +922,7 @@ export default function EditorPage() {
         const queryString = params.toString();
         const url = `/documents/${companyIdNum}/vorhabensbeschreibung${queryString ? `?${queryString}` : ''}`;
         
+        console.log(`Fetching document from URL: ${url}`);
         const updatedDocument = await apiGet<DocumentResponse>(url);
         
         if (updatedDocument.content_json && updatedDocument.content_json.sections) {
@@ -973,11 +1001,34 @@ export default function EditorPage() {
         }
       } catch (error: unknown) {
         console.error("Error fetching updated document:", error);
-        clearPreview();
-        setChatMessages(prev => [...prev, {
-          role: "assistant",
-          text: `Änderungen wurden gespeichert, aber es gab einen Fehler beim Aktualisieren der Ansicht: ${error instanceof Error ? error.message : "Unknown error"}. Bitte aktualisieren Sie die Seite.`
-        }]);
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        console.error("Error details:", errorMessage);
+        
+        // If it's a 404, the document might not exist - but changes were saved
+        // Try to update local state with the confirmed content instead
+        if (errorMessage.includes("404") || errorMessage.includes("Not Found")) {
+          console.warn("Document fetch returned 404, but changes were saved. Updating local state directly.");
+          
+          // Update local sections state with the confirmed content
+          setSections(prev => prev.map(sec => {
+            if (updatedSectionIds.includes(sec.id) && suggestedContent[sec.id]) {
+              return { ...sec, content: suggestedContent[sec.id] };
+            }
+            return sec;
+          }));
+          
+          clearPreview();
+          setChatMessages(prev => [...prev, {
+            role: "assistant",
+            text: "Änderungen wurden gespeichert und angewendet."
+          }]);
+        } else {
+          clearPreview();
+          setChatMessages(prev => [...prev, {
+            role: "assistant",
+            text: `Änderungen wurden gespeichert, aber es gab einen Fehler beim Aktualisieren der Ansicht: ${errorMessage}. Bitte aktualisieren Sie die Seite.`
+          }]);
+        }
       }
     } catch (error: unknown) {
       console.error("Error approving edit:", error);
@@ -1131,26 +1182,69 @@ export default function EditorPage() {
         
         const messageId = `msg-${Date.now()}`;
         
+        // Verify sections exist before setting preview
+        const availableSectionIds = sections.map(s => s.id);
+        const validPreviewSectionIds = Object.keys(validatedSuggestedContent).filter(id => 
+          availableSectionIds.includes(id)
+        );
+        
+        if (validPreviewSectionIds.length === 0) {
+          console.error("No valid preview sections found! Requested:", Object.keys(validatedSuggestedContent), "Available:", availableSectionIds);
+          setChatMessages(prev => [...prev, {
+            role: "assistant",
+            text: "Fehler: Die angegebenen Abschnitte wurden nicht gefunden. Bitte versuchen Sie es erneut."
+          }]);
+          return;
+        }
+        
+        // Filter to only include valid sections
+        const filteredPreviewContent: Record<string, string> = {};
+        validPreviewSectionIds.forEach(id => {
+          filteredPreviewContent[id] = validatedSuggestedContent[id];
+        });
+        
         // Show preview FIRST with validated content (before adding message to chat)
-        setPreviewContent(validatedSuggestedContent);
-        setPreviewSectionIds(Object.keys(validatedSuggestedContent));
+        console.log("=== SETTING PREVIEW ===");
+        console.log("Setting preview content for sections:", validPreviewSectionIds);
+        console.log("Preview content keys:", Object.keys(filteredPreviewContent));
+        console.log("Available section IDs:", availableSectionIds);
+        console.log("Current sections:", sections.map(s => s.id));
+        // Set preview state using functional updates to ensure latest state
+        setPreviewContent(() => {
+          console.log("[STATE UPDATE] Setting previewContent:", filteredPreviewContent);
+          return filteredPreviewContent;
+        });
+        setPreviewSectionIds(() => {
+          console.log("[STATE UPDATE] Setting previewSectionIds:", validPreviewSectionIds);
+          return validPreviewSectionIds;
+        });
+        
+        // Verify preview was set after React state update
+        setTimeout(() => {
+          console.log("[STATE VERIFY] Preview should be set now");
+          console.log("[STATE VERIFY] Expected previewContent keys:", Object.keys(filteredPreviewContent));
+          console.log("[STATE VERIFY] Expected previewSectionIds:", validPreviewSectionIds);
+        }, 100);
         
         // Scroll to first preview section after a brief delay to ensure DOM is updated
         setTimeout(() => {
-          const firstPreviewSectionId = Object.keys(validatedSuggestedContent)[0];
+          const firstPreviewSectionId = validPreviewSectionIds[0];
+          console.log("Scrolling to preview section:", firstPreviewSectionId);
           if (firstPreviewSectionId && sectionRefs.current[firstPreviewSectionId]) {
             sectionRefs.current[firstPreviewSectionId]?.scrollIntoView({ 
               behavior: 'smooth', 
               block: 'center' 
             });
+          } else {
+            console.warn("Preview section ref not found:", firstPreviewSectionId, "Available refs:", Object.keys(sectionRefs.current));
           }
-        }, 100);
+        }, 200);
         
         // Then add message to chat with approve/reject buttons
         setChatMessages(prev => [...prev, {
           role: "assistant",
           text: response.message,
-          suggestedContent: validatedSuggestedContent, // Use validated content
+          suggestedContent: filteredPreviewContent, // Use filtered content (only valid sections)
           requiresConfirmation: true,
           messageId: messageId
         }]);
@@ -1431,6 +1525,26 @@ export default function EditorPage() {
         <section className={styles.editorArea}>
           {/* Document editor */}
           <div className={styles.documentBox}>
+            {/* Debug: Show preview state indicator */}
+            {previewContent && previewSectionIds.length > 0 && (
+              <div style={{
+                position: "fixed",
+                top: "10px",
+                right: "10px",
+                background: "#fff",
+                border: "2px solid #f59e0b",
+                padding: "0.5rem",
+                borderRadius: "4px",
+                fontSize: "0.75rem",
+                zIndex: 9999,
+                maxWidth: "200px",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.2)"
+              }}>
+                <strong>🔍 Preview Active</strong>
+                <div>Sections: {previewSectionIds.join(", ")}</div>
+                <div>Keys: {Object.keys(previewContent).join(", ")}</div>
+              </div>
+            )}
             {isLoading ? (
               <p className={styles.noSectionsMessage}>Loading document...</p>
             ) : editorMode === null ? (
@@ -1645,6 +1759,13 @@ export default function EditorPage() {
                 {sections.map((s) => {
                   const depth = s.id.split(".").length;
                   const isTopLevel = depth === 1;
+                  const isInPreview = previewContent && previewSectionIds.includes(s.id) && previewContent[s.id];
+                  
+                  // Debug log for preview check
+                  if (isInPreview) {
+                    console.log(`[RENDER] Section ${s.id} is in preview - showing preview box`);
+                  }
+                  
                   return (
                     <div
                       key={s.id}
@@ -1662,11 +1783,127 @@ export default function EditorPage() {
                           paddingLeft: depth > 1 ? `${(depth - 1) * 1.2}rem` : "0"
                         }}
                       >
-                        {s.title}
+                      {s.title}
+                    </div>
+                    {/* Show preview if this section is in preview mode */}
+                    {isInPreview ? (
+                      // Show diff view for sections in preview mode
+                      <div 
+                        style={{ 
+                        border: "2px solid var(--brand-gold)", 
+                        borderRadius: "6px",
+                        padding: "0.8rem",
+                        backgroundColor: "#fffef0",
+                        marginBottom: "0.5rem"
+                      }}>
+                        <div style={{ 
+                          fontSize: "0.75rem", 
+                          color: "var(--brand-gold-dark)",
+                          marginBottom: "0.5rem",
+                          fontWeight: "600"
+                        }}>
+                          Preview (not saved yet)
+                        </div>
+                        {/* For milestone tables, render the table component in preview */}
+                        {(s.id === "4.1" || s.type === "milestone_table") ? (
+                          <>
+                            {/* Original content (faded) */}
+                            {s.content && (
+                              <div style={{
+                                marginBottom: "0.8rem",
+                                paddingBottom: "0.8rem",
+                                borderBottom: "1px dashed #ccc",
+                                opacity: 0.6
+                              }}>
+                                <div style={{
+                                  fontSize: "0.75rem",
+                                  color: "#999",
+                                  marginBottom: "0.3rem",
+                                  fontWeight: "600"
+                                }}>
+                                  Original:
+                                </div>
+                                <MilestoneTable
+                                  sectionId={s.id}
+                                  content={s.content}
+                                  onContentChange={() => {}}
+                                />
+                              </div>
+                            )}
+                            {/* Suggested content (highlighted) */}
+                            <div>
+                              <div style={{
+                                fontSize: "0.75rem",
+                                color: "var(--brand-gold-dark)",
+                                marginBottom: "0.3rem",
+                                fontWeight: "600"
+                              }}>
+                                Suggested:
+                              </div>
+                              <MilestoneTable
+                                sectionId={s.id}
+                                content={previewContent[s.id]}
+                                onContentChange={() => {}}
+                              />
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            {/* Original content (faded/strikethrough) */}
+                            {s.content && (
+                              <div style={{
+                                marginBottom: "0.8rem",
+                                paddingBottom: "0.8rem",
+                                borderBottom: "1px dashed #ccc"
+                              }}>
+                                <div style={{
+                                  fontSize: "0.75rem",
+                                  color: "#999",
+                                  marginBottom: "0.3rem",
+                                  fontWeight: "600"
+                                }}>
+                                  Original:
+                                </div>
+                                <div style={{
+                                  color: "#999",
+                                  textDecoration: "line-through",
+                                  opacity: 0.6,
+                                  fontSize: "0.9rem",
+                                  lineHeight: "1.5"
+                                }}>
+                                  {s.content}
+                                </div>
+                              </div>
+                            )}
+                            {/* Suggested content (highlighted) */}
+                            <div>
+                              <div style={{
+                                fontSize: "0.75rem",
+                                color: "var(--brand-gold-dark)",
+                                marginBottom: "0.3rem",
+                                fontWeight: "600"
+                              }}>
+                                Suggested:
+                              </div>
+                              <div style={{
+                                color: "var(--brand-text-dark)",
+                                backgroundColor: "#fff9e6",
+                                padding: "0.6rem",
+                                borderRadius: "4px",
+                                fontSize: "0.9rem",
+                                lineHeight: "1.5",
+                                whiteSpace: "pre-wrap"
+                              }}>
+                                {previewContent[s.id]}
+                              </div>
+                            </div>
+                          </>
+                        )}
                       </div>
-                      {/* Show content boxes in confirmedHeadings mode */}
-                      {/* Section 4.1 should ALWAYS be a milestone table, regardless of type field or content */}
-                      {s.id === "4.1" ? (
+                    ) : (
+                      /* Show content boxes in confirmedHeadings mode */
+                      /* Section 4.1 should ALWAYS be a milestone table, regardless of type field or content */
+                      s.id === "4.1" ? (
                         <MilestoneTable
                           sectionId={s.id}
                           content={s.content}
@@ -1696,7 +1933,8 @@ export default function EditorPage() {
                           placeholder="AI will fill this section, or you can write manually…"
                           disabled={false} // Allow manual editing even before content generation
                         />
-                      )}
+                      )
+                    )}
                     </div>
                   );
                 })}
@@ -1705,6 +1943,13 @@ export default function EditorPage() {
               sections.map((s) => {
                 const depth = s.id.split(".").length;
                 const isTopLevel = depth === 1;
+                const isInPreview = previewContent && previewSectionIds.includes(s.id) && previewContent[s.id];
+                
+                // Debug log for preview check
+                if (isInPreview) {
+                  console.log(`[RENDER editingContent] Section ${s.id} is in preview - showing preview box`);
+                }
+                
                 return (
                   <div
                     key={s.id}
@@ -1722,7 +1967,7 @@ export default function EditorPage() {
                     >
                       {s.title}
                     </div>
-                    {previewContent && previewSectionIds.includes(s.id) ? (
+                    {isInPreview ? (
                       // Show diff view for sections in preview mode
                       <div style={{ 
                         border: "2px solid var(--brand-gold)", 
