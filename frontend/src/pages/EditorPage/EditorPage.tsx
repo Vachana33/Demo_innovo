@@ -1130,7 +1130,23 @@ export default function EditorPage() {
         }
         
         const messageId = `msg-${Date.now()}`;
-        // Use validated content instead of raw response
+        
+        // Show preview FIRST with validated content (before adding message to chat)
+        setPreviewContent(validatedSuggestedContent);
+        setPreviewSectionIds(Object.keys(validatedSuggestedContent));
+        
+        // Scroll to first preview section after a brief delay to ensure DOM is updated
+        setTimeout(() => {
+          const firstPreviewSectionId = Object.keys(validatedSuggestedContent)[0];
+          if (firstPreviewSectionId && sectionRefs.current[firstPreviewSectionId]) {
+            sectionRefs.current[firstPreviewSectionId]?.scrollIntoView({ 
+              behavior: 'smooth', 
+              block: 'center' 
+            });
+          }
+        }, 100);
+        
+        // Then add message to chat with approve/reject buttons
         setChatMessages(prev => [...prev, {
           role: "assistant",
           text: response.message,
@@ -1139,9 +1155,6 @@ export default function EditorPage() {
           messageId: messageId
         }]);
         
-        // Show preview with validated content
-        setPreviewContent(validatedSuggestedContent);
-        setPreviewSectionIds(Object.keys(validatedSuggestedContent));
         return;
       }
 
