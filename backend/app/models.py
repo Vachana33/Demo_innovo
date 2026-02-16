@@ -99,6 +99,13 @@ class Document(Base):
     # Funding program association (nullable for legacy documents)
     funding_program_id = Column(Integer, ForeignKey("funding_programs.id"), nullable=True, index=True)
 
+    # Template association
+    # template_id: UUID FK to user_templates (for user-defined templates)
+    # template_name: String for system templates (e.g., "wtt_v1")
+    # If both are None, use default system template
+    template_id = Column(UUID(as_uuid=True), ForeignKey("user_templates.id"), nullable=True, index=True)
+    template_name = Column(String, nullable=True)  # System template name (e.g., "wtt_v1")
+
     # UNIQUE constraint: one document per (company, funding_program, type)
     __table_args__ = (
         UniqueConstraint('company_id', 'funding_program_id', 'type', name='uq_document_company_program_type'),
@@ -107,6 +114,7 @@ class Document(Base):
     # Relationships
     company = relationship("Company", backref="documents")
     funding_program = relationship("FundingProgram", backref="documents")
+    template = relationship("UserTemplate", backref="documents")  # For user templates
 
 class File(Base):
     __tablename__ = "files"
@@ -245,3 +253,33 @@ class FundingProgramGuidelinesSummary(Base):
 
     # Relationships
     funding_program = relationship("FundingProgram", backref="guidelines_summary")
+
+class AlteVorhabensbeschreibungDocument(Base):
+    """
+    Historical Vorhabensbeschreibung documents for writing style extraction.
+    System-level module, not linked to funding programs or companies.
+    """
+    __tablename__ = "alte_vorhabensbeschreibung_documents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    file_id = Column(UUID(as_uuid=True), ForeignKey("files.id"), nullable=False, index=True)
+    original_filename = Column(String, nullable=False)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    uploaded_by = Column(String, ForeignKey("users.email"), nullable=False)
+
+    # Relationships
+    file = relationship("File", backref="alte_vorhabensbeschreibung_documents")
+    uploader = relationship("User", backref="uploaded_alte_vorhabensbeschreibung_documents")
+
+class AlteVorhabensbeschreibungStyleProfile(Base):
+    """
+    System-level writing style profile extracted from historical documents.
+    Only ONE active profile should exist at a time.
+    """
+    __tablename__ = "alte_vorhabensbeschreibung_style_profile"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    combined_hash = Column(Text, unique=True, nullable=False, index=True)  # SHA256 hash of all document content hashes
+    style_summary_json = Column(JSON, nullable=False)  # Extracted writing style patterns
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

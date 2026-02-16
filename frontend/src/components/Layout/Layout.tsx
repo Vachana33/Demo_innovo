@@ -35,6 +35,7 @@ export default function Layout({ children }: LayoutProps) {
     { path: "/companies", label: "Companies", icon: "🏢" },
     { path: "/documents", label: "Documents", icon: "📄" },
     { path: "/templates", label: "Templates", icon: "📋" },
+    { path: "/alte-vorhabensbeschreibung", label: "Alte Vorhabensbeschreibung", icon: "📜" },
   ];
 
   const isActive = (path: string) => {

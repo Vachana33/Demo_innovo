@@ -5,6 +5,7 @@ import FundingProgramsPage from "./pages/FundingProgramsPage/FundingProgramsPage
 import CompaniesPage from "./pages/CompaniesPage/CompaniesPage";
 import DocumentsPage from "./pages/DocumentsPage/DocumentsPage";
 import TemplatesPage from "./pages/TemplatesPage/TemplatesPage";
+import AlteVorhabensbeschreibungPage from "./pages/AlteVorhabensbeschreibungPage/AlteVorhabensbeschreibungPage";
 import EditorPage from "./pages/EditorPage/EditorPage";
 import TemplateEditorPage from "./pages/TemplateEditorPage/TemplateEditorPage";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -67,6 +68,16 @@ function App() {
           <ProtectedRoute>
             <Layout>
               <TemplatesPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/alte-vorhabensbeschreibung"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <AlteVorhabensbeschreibungPage />
             </Layout>
           </ProtectedRoute>
         }

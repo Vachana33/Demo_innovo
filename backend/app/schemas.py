@@ -112,6 +112,8 @@ class DocumentResponse(BaseModel):
     content_json: dict
     chat_history: Optional[list[dict]] = None  # Chat messages history
     headings_confirmed: bool = False  # Phase 2.6: Headings confirmation flag
+    template_id: Optional[str] = None  # User template UUID (as string)
+    template_name: Optional[str] = None  # System template name
     updated_at: datetime
 
     class Config:
@@ -208,3 +210,14 @@ class CompanyDocumentResponse(BaseModel):
 
 class CompanyDocumentListResponse(BaseModel):
     documents: List[CompanyDocumentResponse]
+
+class AlteVorhabensbeschreibungDocumentResponse(BaseModel):
+    id: str  # UUID as string
+    file_id: str  # UUID as string
+    original_filename: str
+    uploaded_at: str  # ISO format datetime string
+    file_type: str
+    file_size: int
+
+    class Config:
+        from_attributes = True

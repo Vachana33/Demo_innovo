@@ -138,15 +138,25 @@ export default function EditorPage() {
       try {
         setIsLoading(true);
         
-        // Get funding_program_id from URL params (passed from ProjectsPage)
+        // Get parameters from URL (passed from DocumentsPage or ProjectsPage)
         const urlParams = new URLSearchParams(window.location.search);
         const fundingProgramId = urlParams.get('funding_program_id');
+        const templateId = urlParams.get('template_id');
+        const templateName = urlParams.get('template_name');
         
-        // Build URL with funding_program_id if available
-        let url = `/documents/${companyIdNum}/vorhabensbeschreibung`;
+        // Build URL with query parameters
+        const params = new URLSearchParams();
         if (fundingProgramId) {
-          url += `?funding_program_id=${fundingProgramId}`;
+          params.append('funding_program_id', fundingProgramId);
         }
+        if (templateId) {
+          params.append('template_id', templateId);
+        }
+        if (templateName) {
+          params.append('template_name', templateName);
+        }
+        const queryString = params.toString();
+        const url = `/documents/${companyIdNum}/vorhabensbeschreibung${queryString ? `?${queryString}` : ''}`;
         
         const data = await apiGet<DocumentResponse>(url);
         setDocumentId(data.id);

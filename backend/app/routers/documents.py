@@ -6,7 +6,7 @@ from app.database import get_db
 from app.models import Document, Company, User, FundingProgram
 from app.schemas import DocumentResponse, DocumentUpdate, ChatRequest, ChatResponse, ChatConfirmationRequest, DocumentListItem
 from app.dependencies import get_current_user
-from app.template_resolver import get_template_for_funding_program
+from app.template_resolver import get_template_for_document
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timezone
 import os
@@ -130,7 +130,9 @@ def _safe_get_document_by_id(document_id: int, db: Session) -> Optional[Document
 )
 def get_document(
     company_id: int,
-    funding_program_id: Optional[int] = Query(None, description="Funding program ID for template resolution"),
+    funding_program_id: Optional[int] = Query(None, description="Funding program ID"),
+    template_id: Optional[str] = Query(None, description="User template ID (UUID)"),
+    template_name: Optional[str] = Query(None, description="System template name (e.g., 'wtt_v1')"),
     db: Session = Depends(get_db),  # noqa: B008
     current_user: User = Depends(get_current_user)  # noqa: B008
 ):
@@ -206,9 +208,9 @@ def get_document(
                         needs_template = len(existing_sections) == 0 or len(existing_sections) < 20
 
                         if needs_template:
-                            # Populate with template structure (Phase 2.5: use template resolver)
+                            # Populate with template structure using document's template
                             try:
-                                template = get_template_for_funding_program(funding_program, db)
+                                template = get_template_for_document(legacy_doc, db, current_user.email)
                                 sections = template.get("sections", [])
 
                                 # Initialize milestone table for section 4.1 if present
@@ -229,8 +231,8 @@ def get_document(
                                             section["content"] = existing_by_id[section_id].get("content", "")
 
                                 legacy_doc.content_json = {"sections": sections}
-                                template_ref = funding_program.template_ref or funding_program.template_name or "unknown"
-                                logger.info(f"[TEMPLATE RESOLVER] Populated legacy document {legacy_doc.id} with template '{template_ref}' structure")
+                                template_info = f"template_id={legacy_doc.template_id}" if legacy_doc.template_id else f"template_name={legacy_doc.template_name or 'default'}"
+                                logger.info(f"[TEMPLATE RESOLVER] Populated legacy document {legacy_doc.id} with {template_info}")
                             except Exception as template_error:
                                 logger.warning(f"Failed to populate template structure for legacy document {legacy_doc.id}: {str(template_error)}")
                                 # Continue with upgrade even if template population fails
@@ -252,11 +254,40 @@ def get_document(
 
         # If still no document, create from template
         if not document:
-            # Phase 2.5: Resolve template using template resolver (handles both system and user templates)
+            # Determine template_id and template_name from query parameters
+            doc_template_id = None
+            doc_template_name = None
+            
+            if template_id:
+                # User template selected
+                try:
+                    import uuid
+                    doc_template_id = uuid.UUID(template_id)
+                    logger.info(f"[TEMPLATE RESOLVER] Creating document with user template_id: {template_id}")
+                except ValueError:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid template_id format: {template_id}"
+                    )
+            elif template_name:
+                # System template selected
+                doc_template_name = template_name
+                logger.info(f"[TEMPLATE RESOLVER] Creating document with system template_name: {template_name}")
+            # If neither is provided, will use default template
+            
+            # Resolve template first (before creating document) to validate template exists
+            # Create a temporary document-like object for template resolution
+            class TempDocument:
+                def __init__(self, template_id, template_name):
+                    self.template_id = template_id
+                    self.template_name = template_name
+            
+            temp_document = TempDocument(doc_template_id, doc_template_name)
+            
             try:
-                template = get_template_for_funding_program(funding_program, db)
+                template = get_template_for_document(temp_document, db, current_user.email)
             except ValueError as e:
-                logger.error(f"[TEMPLATE RESOLVER] Failed to resolve template for funding program {funding_program_id}: {str(e)}")
+                logger.error(f"[TEMPLATE RESOLVER] Failed to resolve template: {str(e)}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Template resolution failed: {str(e)}"
@@ -267,7 +298,7 @@ def get_document(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Template resolution error: {str(e)}"
                 ) from e
-
+            
             # Convert template to document sections format
             sections = template.get("sections", [])
 
@@ -279,19 +310,21 @@ def get_document(
                 elif "content" not in section:
                     section["content"] = ""
 
-            # Create document from template
+            # Create document with template fields and resolved sections
             try:
                 document = Document(
                     company_id=company_id,
                     funding_program_id=funding_program_id,
                     type="vorhabensbeschreibung",
+                    template_id=doc_template_id,
+                    template_name=doc_template_name,
                     content_json={"sections": sections}
                 )
                 db.add(document)
                 db.commit()
                 db.refresh(document)
-                template_ref = funding_program.template_ref or funding_program.template_name or "unknown"
-                logger.info(f"[TEMPLATE RESOLVER] Created document {document.id} from template '{template_ref}' (source={funding_program.template_source or 'legacy'}) for company {company_id}")
+                template_info = f"template_id={document.template_id}" if document.template_id else f"template_name={document.template_name or 'default'}"
+                logger.info(f"[TEMPLATE RESOLVER] Created document {document.id} from {template_info} for company {company_id}")
             except Exception as e:
                 db.rollback()
                 logger.error(f"Failed to create document from template: {str(e)}", exc_info=True)
@@ -885,84 +918,90 @@ def _build_style_reference_text() -> str:
 def _format_company_context_for_prompt(
     company_profile: Optional[Dict[str, Any]],
     company_name: str,
-    website_text: str,
-    transcript_text: str,
+    website_clean_text: Optional[str] = None,
+    transcript_clean: Optional[str] = None,
     company_id: Optional[int] = None
 ) -> str:
     """
     Format company context for LLM prompts.
-
-    Phase 2D: Uses structured company_profile as PRIMARY source,
-    falls back to raw text only if profile is missing.
+    
+    Uses structured company_profile as PRIMARY factual source,
+    enriched with cleaned website and transcript text for context.
 
     Args:
-        company_profile: Structured company profile dict (from extraction)
+        company_profile: Structured company profile dict (PRIMARY source)
         company_name: Company name
-        website_text: Raw website text (fallback)
-        transcript_text: Raw transcript text (fallback)
+        website_clean_text: Cleaned website text (contextual enrichment)
+        transcript_clean: Cleaned transcript text (contextual enrichment)
         company_id: Company ID for logging (optional)
 
     Returns:
         Formatted company context string for prompt
     """
+    context_parts = []
+    
+    # PRIMARY SOURCE: Structured company profile
     if company_profile:
-        # Guardrail A: Log successful use of structured profile
         if company_id:
-            logger.info(f"Using structured company_profile for company_id={company_id}")
-        # Use structured profile as PRIMARY source
-        profile_parts = [f"- Firmenname: {company_name}"]
+            logger.info(f"Using structured company_profile as PRIMARY source for company_id={company_id}")
+        
+        context_parts.append("=== PRIMÄRE FAKTENQUELLE (Strukturiertes Firmenprofil) ===")
+        context_parts.append(f"Firmenname: {company_name}")
 
         if company_profile.get("industry"):
-            profile_parts.append(f"- Branche: {company_profile['industry']}")
+            context_parts.append(f"Branche: {company_profile['industry']}")
 
         if company_profile.get("products_or_services"):
             products = company_profile["products_or_services"]
             if isinstance(products, list) and products:
                 products_str = ", ".join(products)
-                profile_parts.append(f"- Produkte/Dienstleistungen: {products_str}")
+                context_parts.append(f"Produkte/Dienstleistungen: {products_str}")
             elif isinstance(products, str):
-                profile_parts.append(f"- Produkte/Dienstleistungen: {products}")
+                context_parts.append(f"Produkte/Dienstleistungen: {products}")
 
         if company_profile.get("business_model"):
-            profile_parts.append(f"- Geschäftsmodell: {company_profile['business_model']}")
+            context_parts.append(f"Geschäftsmodell: {company_profile['business_model']}")
 
         if company_profile.get("market"):
-            profile_parts.append(f"- Zielmarkt: {company_profile['market']}")
+            context_parts.append(f"Zielmarkt: {company_profile['market']}")
 
         if company_profile.get("innovation_focus"):
-            profile_parts.append(f"- Innovationsschwerpunkt: {company_profile['innovation_focus']}")
+            context_parts.append(f"Innovationsschwerpunkt: {company_profile['innovation_focus']}")
 
         if company_profile.get("company_size"):
-            profile_parts.append(f"- Unternehmensgröße: {company_profile['company_size']}")
+            context_parts.append(f"Unternehmensgröße: {company_profile['company_size']}")
 
         if company_profile.get("location"):
-            profile_parts.append(f"- Standort: {company_profile['location']}")
-
-        return "\n".join(profile_parts)
+            context_parts.append(f"Standort: {company_profile['location']}")
     else:
-        # Guardrail A: Log fallback to raw text
         if company_id:
-            logger.warning(
-                f"FALLBACK to raw text for company_id={company_id} "
-                f"(company_profile missing)"
-            )
-
-        # Fallback to raw text if profile not available
-        # Smart truncation for company data
-        MAX_TEXT_LENGTH = 50000
-
-        def smart_truncate(text: str, max_length: int) -> str:
-            """Truncate text intelligently, keeping beginning and end if too long."""
-            if len(text) <= max_length:
-                return text
-            first_part = text[:int(max_length * 0.6)]
-            last_part = text[-int(max_length * 0.4):]
-            return f"{first_part}\n\n[... content truncated ...]\n\n{last_part}"
-
-        website_text_processed = smart_truncate(website_text, MAX_TEXT_LENGTH)
-        transcript_text_processed = smart_truncate(transcript_text, MAX_TEXT_LENGTH)
-
-        return f"- Firmenname: {company_name}\n- Website-Inhalt: {website_text_processed}\n- Besprechungsprotokoll: {transcript_text_processed}"
+            logger.warning(f"company_profile missing for company_id={company_id}, using name only")
+        context_parts.append("=== PRIMÄRE FAKTENQUELLE ===")
+        context_parts.append(f"Firmenname: {company_name}")
+    
+    # CONTEXTUAL ENRICHMENT: Cleaned texts
+    if website_clean_text or transcript_clean:
+        context_parts.append("\n=== KONTEXTUELLE ERGÄNZUNG ===")
+        
+        if website_clean_text:
+            # Smart truncation for cleaned website text
+            MAX_TEXT_LENGTH = 30000
+            if len(website_clean_text) > MAX_TEXT_LENGTH:
+                first_part = website_clean_text[:int(MAX_TEXT_LENGTH * 0.6)]
+                last_part = website_clean_text[-int(MAX_TEXT_LENGTH * 0.4):]
+                website_clean_text = f"{first_part}\n\n[... Inhalt gekürzt ...]\n\n{last_part}"
+            context_parts.append(f"Website-Inhalt (bereinigt):\n{website_clean_text}")
+        
+        if transcript_clean:
+            # Smart truncation for cleaned transcript
+            MAX_TEXT_LENGTH = 30000
+            if len(transcript_clean) > MAX_TEXT_LENGTH:
+                first_part = transcript_clean[:int(MAX_TEXT_LENGTH * 0.6)]
+                last_part = transcript_clean[-int(MAX_TEXT_LENGTH * 0.4):]
+                transcript_clean = f"{first_part}\n\n[... Inhalt gekürzt ...]\n\n{last_part}"
+            context_parts.append(f"Besprechungsprotokoll (bereinigt):\n{transcript_clean}")
+    
+    return "\n".join(context_parts)
 
 
 def _split_sections_into_batches(sections: List[dict], batch_size: int = 4) -> List[List[dict]]:
@@ -992,11 +1031,12 @@ def _generate_batch_content(
     client: OpenAI,
     batch_sections: List[dict],
     company_name: str,
-    website_text: str,
-    transcript_text: str,
     company_profile: Optional[Dict[str, Any]] = None,
+    website_clean_text: Optional[str] = None,
+    transcript_clean: Optional[str] = None,
     company_id: Optional[int] = None,
     funding_program_rules: Optional[Dict[str, Any]] = None,
+    style_profile: Optional[Dict[str, Any]] = None,
     max_retries: int = 2
 ) -> dict:
     """
@@ -1035,83 +1075,117 @@ def _generate_batch_content(
 
     headings_text = "\n".join(headings_list)
 
-    # Phase 2D: Format company context using structured profile (primary) or raw text (fallback)
-    company_context = _format_company_context_for_prompt(
-        company_profile=company_profile,
-        company_name=company_name,
-        website_text=website_text,
-        transcript_text=transcript_text,
-        company_id=company_id
-    )
-
     # IMPORTANT: This prompt is for INITIAL CONTENT GENERATION only.
     # It assumes empty sections and focuses on creation.
     # Do NOT reuse this prompt for chat-based editing.
     # For editing existing content, use _generate_section_content() instead.
 
-    # Build rules context from funding program guidelines
-    rules_context = ""
+    # ============================================
+    # PROMPT STRUCTURE: Rules → Company → Style → Task
+    # ============================================
+
+    # 1. RULES SECTION (from funding program guidelines)
+    rules_section = ""
     if funding_program_rules:
         rules_parts = []
         if funding_program_rules.get("eligibility_rules"):
-            rules_parts.append(f"Berechtigungskriterien:\n" + "\n".join(f"- {r}" for r in funding_program_rules["eligibility_rules"]))
+            rules_parts.append("Berechtigungskriterien:\n" + "\n".join(f"- {r}" for r in funding_program_rules["eligibility_rules"]))
         if funding_program_rules.get("required_sections"):
-            rules_parts.append(f"Erforderliche Abschnitte:\n" + "\n".join(f"- {r}" for r in funding_program_rules["required_sections"]))
+            rules_parts.append("Erforderliche Abschnitte:\n" + "\n".join(f"- {r}" for r in funding_program_rules["required_sections"]))
         if funding_program_rules.get("forbidden_content"):
-            rules_parts.append(f"Verbotene Inhalte:\n" + "\n".join(f"- {r}" for r in funding_program_rules["forbidden_content"]))
+            rules_parts.append("Verbotene Inhalte:\n" + "\n".join(f"- {r}" for r in funding_program_rules["forbidden_content"]))
         if funding_program_rules.get("formal_requirements"):
-            rules_parts.append(f"Formale Anforderungen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["formal_requirements"]))
+            rules_parts.append("Formale Anforderungen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["formal_requirements"]))
         if funding_program_rules.get("evaluation_criteria"):
-            rules_parts.append(f"Bewertungskriterien:\n" + "\n".join(f"- {r}" for r in funding_program_rules["evaluation_criteria"]))
+            rules_parts.append("Bewertungskriterien:\n" + "\n".join(f"- {r}" for r in funding_program_rules["evaluation_criteria"]))
         if funding_program_rules.get("funding_limits"):
-            rules_parts.append(f"Fördergrenzen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["funding_limits"]))
+            rules_parts.append("Fördergrenzen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["funding_limits"]))
         if funding_program_rules.get("deadlines"):
-            rules_parts.append(f"Fristen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["deadlines"]))
+            rules_parts.append("Fristen:\n" + "\n".join(f"- {r}" for r in funding_program_rules["deadlines"]))
         if funding_program_rules.get("important_notes"):
-            rules_parts.append(f"Wichtige Hinweise:\n" + "\n".join(f"- {r}" for r in funding_program_rules["important_notes"]))
+            rules_parts.append("Wichtige Hinweise:\n" + "\n".join(f"- {r}" for r in funding_program_rules["important_notes"]))
         
         if rules_parts:
-            rules_context = "\n\nFÖRDERRICHTLINIEN:\n" + "\n\n".join(rules_parts) + "\n\n"
+            rules_section = "=== 1. FÖRDERRICHTLINIEN UND REGELN ===\n\n" + "\n\n".join(rules_parts) + "\n\n"
 
-    # Build prompt with PDF style reference instructions
-    prompt = f"""Sie sind ein Expertenberater, der bei der Erstellung einer "Vorhabensbeschreibung" für einen Förderantrag hilft.
+    # 2. COMPANY SOURCE SECTION (primary: company_profile, enrichment: cleaned texts)
+    company_context = _format_company_context_for_prompt(
+        company_profile=company_profile,
+        company_name=company_name,
+        website_clean_text=website_clean_text,
+        transcript_clean=transcript_clean,
+        company_id=company_id
+    )
+    company_section = f"=== 2. FIRMENINFORMATIONEN (FAKTENQUELLE) ===\n\n{company_context}\n\n"
 
-WICHTIG - STILREFERENZEN:
-Sie haben Zugriff auf zwei Beispiel-Vorhabensbeschreibungen als PDF-Dateien (DIlico.pdf und Lagotec.pdf).
-Diese PDFs dienen AUSSCHLIESSLICH als Stilreferenzen für:
-- Ton und Formulierungsstil
-- Absatzlänge und narrative Tiefe
-- Strukturdichte
-- Formalisierungsgrad
-- Fördermittel-typische Struktur
+    # 3. STYLE GUIDE SECTION (from AlteVorhabensbeschreibungStyleProfile)
+    style_section = ""
+    if style_profile:
+        style_parts = []
+        
+        if style_profile.get("structure_patterns"):
+            patterns = style_profile["structure_patterns"]
+            if isinstance(patterns, list) and patterns:
+                style_parts.append("Strukturmuster:\n" + "\n".join(f"- {p}" for p in patterns))
+        
+        if style_profile.get("tone_characteristics"):
+            tone = style_profile["tone_characteristics"]
+            if isinstance(tone, list) and tone:
+                style_parts.append("Ton und Charakteristik:\n" + "\n".join(f"- {t}" for t in tone))
+        
+        if style_profile.get("writing_style_rules"):
+            rules = style_profile["writing_style_rules"]
+            if isinstance(rules, list) and rules:
+                style_parts.append("Schreibstil-Regeln:\n" + "\n".join(f"- {r}" for r in rules))
+        
+        if style_profile.get("storytelling_flow"):
+            flow = style_profile["storytelling_flow"]
+            if isinstance(flow, list) and flow:
+                style_parts.append("Erzählstruktur und Flow:\n" + "\n".join(f"- {f}" for f in flow))
+        
+        if style_profile.get("common_section_headings"):
+            headings = style_profile["common_section_headings"]
+            if isinstance(headings, list) and headings:
+                style_parts.append("Typische Abschnittsüberschriften:\n" + "\n".join(f"- {h}" for h in headings))
+        
+        if style_parts:
+            style_section = "=== 3. STIL-LEITFADEN ===\n\n" + "\n\n".join(style_parts) + "\n\n"
+            style_section += "WICHTIG: Folgen Sie diesen Stilrichtlinien STRENG bei der Generierung.\n"
+            style_section += "Passen Sie Ton, Struktur, Satzlänge und Erzählweise an diese Vorgaben an.\n\n"
+    else:
+        logger.warning("No style profile available, using default style guidelines")
+        style_section = "=== 3. STIL-LEITFADEN ===\n\n"
+        style_section += "- Verwenden Sie formelle Fördermittel-/Geschäftssprache\n"
+        style_section += "- Professioneller, überzeugender Ton\n"
+        style_section += "- Klare Absatzstruktur\n\n"
 
-KRITISCH:
-- Kopieren Sie KEINEN Inhalt aus diesen PDFs
-- Paraphrasieren Sie KEINEN Inhalt aus diesen PDFs
-- Verwenden Sie KEINE Fakten aus diesen Dokumenten
-- Erwähnen Sie diese PDFs NICHT im generierten Text
-- Alle faktischen Inhalte müssen AUSSCHLIESSLICH aus den untenstehenden Firmeninformationen stammen
+    # 4. GENERATION TASK
+    task_section = f"""=== 4. GENERIERUNGSAUFGABE ===
 
-{rules_context}Firmeninformationen:
-{company_context}
-
-Die folgenden Abschnitte müssen generiert werden:
+Zu generierende Abschnitte:
 {headings_text}
 
-Generieren Sie für jeden Abschnitt detaillierte, professionelle Inhalte basierend AUSSCHLIESSLICH auf den oben genannten Firmeninformationen.
-{rules_context and "WICHTIG: Beachten Sie die Förderrichtlinien bei der Generierung. Stellen Sie sicher, dass alle erforderlichen Aspekte abgedeckt werden und verbotene Inhalte vermieden werden." or ""}
+AUFGABE:
+Generieren Sie für jeden oben genannten Abschnitt detaillierte, professionelle Inhalte.
 
-SPRACHE UND STIL:
+WICHTIGE RAND bedingungen:
+- Folgen Sie den Förderrichtlinien STRENG
+- Erfinden Sie KEINE Daten - verwenden Sie NUR die bereitgestellten Firmeninformationen
+- Folgen Sie dem Stil-Leitfaden STRENG
 - Schreiben Sie AUSSCHLIESSLICH auf Deutsch
-- Verwenden Sie formelle Fördermittel-/Geschäftssprache
 - Verwenden Sie NUR Absätze (keine Aufzählungspunkte)
-- Passen Sie Absatzlänge, narrative Dichte und professionellen Ton an den Stil der Beispiel-PDFs an
-- Wenn Informationen unzureichend sind, generieren Sie plausible, professionelle Inhalte
-- Fügen Sie KEINE Platzhalter ein
-- Stellen Sie KEINE Fragen an den Benutzer
-- Fügen Sie KEINE Zitate oder Haftungsausschlüsse ein
+- Fügen Sie KEINE Platzhalter, Fragen oder Haftungsausschlüsse ein
+- Wenn Informationen unzureichend sind, generieren Sie plausible, professionelle Inhalte basierend auf dem verfügbaren Kontext
 
-WICHTIG: Geben Sie NUR ein gültiges JSON-Objekt mit dieser exakten Struktur zurück:
+"""
+
+    # Build complete prompt
+    prompt = f"""Sie sind ein Expertenberater, der bei der Erstellung einer "Vorhabensbeschreibung" für einen Förderantrag hilft.
+
+{rules_section}{company_section}{style_section}{task_section}
+
+AUSGABEFORMAT:
+Geben Sie NUR ein gültiges JSON-Objekt mit dieser exakten Struktur zurück:
 {{
   "{section_ids[0] if section_ids else "section_id"}": "Generierter Absatztext...",
   "{section_ids[1] if len(section_ids) > 1 else "section_id"}": "Generierter Absatztext..."
@@ -1281,11 +1355,11 @@ def generate_content(
             detail=f"Failed to initialize OpenAI client: {str(e)}"
         ) from e
 
-    # Prepare company data
+    # Prepare company data (use cleaned versions)
     company_name = company.name or "Unknown Company"
-    website_text = company.website_text or ""
-    transcript_text = company.transcript_text or ""
-    company_profile = company.company_profile  # Phase 2D: Use structured profile if available
+    website_clean_text = company.website_clean_text or None
+    transcript_clean = company.transcript_clean or None
+    company_profile = company.company_profile  # PRIMARY factual source (structured JSON)
 
     # Get funding program rules if document has funding_program_id
     funding_program_rules = None
@@ -1297,6 +1371,16 @@ def generate_content(
         if summary:
             funding_program_rules = summary.rules_json
             logger.info(f"Using funding program rules for funding_program_id={document.funding_program_id}")
+
+    # Get style profile (system-level, from AlteVorhabensbeschreibung)
+    style_profile = None
+    from app.models import AlteVorhabensbeschreibungStyleProfile
+    style_profile_record = db.query(AlteVorhabensbeschreibungStyleProfile).first()
+    if style_profile_record:
+        style_profile = style_profile_record.style_summary_json
+        logger.info(f"Using style profile (hash: {style_profile_record.combined_hash[:10]}...)")
+    else:
+        logger.warning("No style profile found - generation will use default style guidelines")
 
     # Filter out milestone tables from content generation (they should not be AI-generated)
     text_sections = [s for s in sections if s.get("type") != "milestone_table"]
@@ -1330,11 +1414,12 @@ def generate_content(
                 client=client,
                 batch_sections=batch,
                 company_name=company_name,
-                website_text=website_text,
-                transcript_text=transcript_text,
-                company_profile=company_profile,  # Phase 2D: Pass structured profile
+                company_profile=company_profile,  # PRIMARY factual source
+                website_clean_text=website_clean_text,  # Contextual enrichment
+                transcript_clean=transcript_clean,  # Contextual enrichment
                 company_id=company.id,  # Guardrail A: Pass company_id for logging
-                funding_program_rules=funding_program_rules,
+                funding_program_rules=funding_program_rules,  # Rules and guidelines
+                style_profile=style_profile,  # Style guide
                 max_retries=2
             )
 
@@ -1964,10 +2049,11 @@ def _generate_section_content(
     current_content: str,
     instruction: str,
     company_name: str,
-    website_text: str,
-    transcript_text: str,
     company_profile: Optional[dict] = None,
-    company_id: Optional[int] = None
+    website_clean_text: Optional[str] = None,
+    transcript_clean: Optional[str] = None,
+    company_id: Optional[int] = None,
+    style_profile: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     ROLE: SECTION EDITOR
@@ -2001,20 +2087,51 @@ def _generate_section_content(
     # For initial generation, use _generate_batch_content() instead.
     # This prompt assumes existing content exists and must be modified, not created.
 
-    # Get style reference text from PDFs (silent fallback if extraction fails)
-    style_reference = _build_style_reference_text()
-
-    # Phase 2D: Format company context using structured profile (primary) or raw text (fallback)
+    # Format company context using cleaned data
     company_context = _format_company_context_for_prompt(
         company_profile=company_profile,
         company_name=company_name,
-        website_text=website_text,
-        transcript_text=transcript_text,
+        website_clean_text=website_clean_text,
+        transcript_clean=transcript_clean,
         company_id=company_id
     )
 
-    # Build prompt - ADD style reference at the beginning, preserve all existing sections
-    prompt = f"""{style_reference}SIE SIND EIN REDAKTEUR, KEIN AUTOR.
+    # Build style guide section from style profile
+    style_guide = ""
+    if style_profile:
+        style_parts = []
+        
+        if style_profile.get("structure_patterns"):
+            patterns = style_profile["structure_patterns"]
+            if isinstance(patterns, list) and patterns:
+                style_parts.append("Strukturmuster:\n" + "\n".join(f"- {p}" for p in patterns))
+        
+        if style_profile.get("tone_characteristics"):
+            tone = style_profile["tone_characteristics"]
+            if isinstance(tone, list) and tone:
+                style_parts.append("Ton und Charakteristik:\n" + "\n".join(f"- {t}" for t in tone))
+        
+        if style_profile.get("writing_style_rules"):
+            rules = style_profile["writing_style_rules"]
+            if isinstance(rules, list) and rules:
+                style_parts.append("Schreibstil-Regeln:\n" + "\n".join(f"- {r}" for r in rules))
+        
+        if style_profile.get("storytelling_flow"):
+            flow = style_profile["storytelling_flow"]
+            if isinstance(flow, list) and flow:
+                style_parts.append("Erzählstruktur:\n" + "\n".join(f"- {f}" for f in flow))
+        
+        if style_parts:
+            style_guide = "=== STIL-LEITFADEN ===\n\n" + "\n\n".join(style_parts) + "\n\n"
+            style_guide += "WICHTIG: Folgen Sie diesen Stilrichtlinien bei der Überarbeitung.\n\n"
+    else:
+        style_guide = "=== STIL-LEITFADEN ===\n\n"
+        style_guide += "- Verwenden Sie formelle Fördermittel-/Geschäftssprache\n"
+        style_guide += "- Professioneller, überzeugender Ton\n"
+        style_guide += "- Klare Absatzstruktur\n\n"
+
+    # Build prompt with style guide
+    prompt = f"""{style_guide}SIE SIND EIN REDAKTEUR, KEIN AUTOR.
 
 - Der folgende Abschnitt EXISTIERT bereits.
 - Ihre Aufgabe ist es, den bestehenden Text gezielt zu überarbeiten.
@@ -2526,11 +2643,21 @@ def chat_with_document(
             detail=f"Failed to initialize OpenAI client: {str(e)}"
         ) from e
 
-    # Prepare company data
+    # Prepare company data (use cleaned versions)
     company_name = company.name or "Unknown Company"
-    website_text = company.website_text or ""
-    transcript_text = company.transcript_text or ""
-    company_profile = company.company_profile  # Phase 2D: Use structured profile if available
+    website_clean_text = company.website_clean_text or None
+    transcript_clean = company.transcript_clean or None
+    company_profile = company.company_profile  # PRIMARY factual source (structured JSON)
+
+    # Get style profile (system-level, from AlteVorhabensbeschreibung)
+    style_profile = None
+    from app.models import AlteVorhabensbeschreibungStyleProfile
+    style_profile_record = db.query(AlteVorhabensbeschreibungStyleProfile).first()
+    if style_profile_record:
+        style_profile = style_profile_record.style_summary_json
+        logger.info(f"Using style profile for chat editing (hash: {style_profile_record.combined_hash[:10]}...)")
+    else:
+        logger.warning("No style profile found for chat editing - using default style guidelines")
 
     # Process each section change
     updated_section_ids = []
@@ -2566,10 +2693,11 @@ def chat_with_document(
                 current_content=current_content,
                 instruction=instruction,
                 company_name=company_name,
-                website_text=website_text,
-                transcript_text=transcript_text,
-                company_profile=company_profile,  # Phase 2D: Pass structured profile
-                company_id=company.id  # Guardrail A: Pass company_id for logging
+                company_profile=company_profile,  # PRIMARY factual source
+                website_clean_text=website_clean_text,  # Contextual enrichment
+                transcript_clean=transcript_clean,  # Contextual enrichment
+                company_id=company.id,  # Guardrail A: Pass company_id for logging
+                style_profile=style_profile  # Style guide
             )
 
             logger.info(f"LLM returned content length: {len(new_content)} characters")

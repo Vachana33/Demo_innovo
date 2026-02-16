@@ -194,10 +194,48 @@ export async function apiUploadFile(
  * Used for guidelines document uploads and other multi-file uploads.
  * Sends files with field name "files" in multipart/form-data.
  */
+export async function apiUploadFilePut(
+  endpoint: string,
+  file: File
+): Promise<unknown> {
+  const token = getAuthToken();
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method: "PUT",
+      headers,
+      body: formData,
+    });
+
+    if (response.status === 401) {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      localStorage.removeItem(USER_EMAIL_KEY);
+      throw new Error("AUTH_EXPIRED");
+    }
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.detail || data.message || "Upload failed");
+    }
+
+    return data;
+  } catch (error) {
+    throw error;
+  }
+}
+
 export async function apiUploadFiles(
   endpoint: string,
   files: File[]
-): Promise<Record<string, unknown>> {
+): Promise<unknown> {
   // #region agent log
   debugLog("api.ts:apiUploadFiles:ENTRY", "Multiple file upload started", { endpoint, fileCount: files.length }, "F");
   // #endregion

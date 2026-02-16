@@ -114,42 +114,66 @@ def resolve_template(
     raise ValueError(f"Unsupported template_source: {template_source}")
 
 
-def get_template_for_funding_program(
-    funding_program,
-    db: Optional[Session] = None
+def get_template_for_document(
+    document,
+    db: Session,
+    user_email: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Convenience function to resolve template from a FundingProgram object.
-
-    Handles both new (template_source + template_ref) and legacy (template_name) formats.
-
+    Resolve template from a Document object.
+    
+    Template resolution priority:
+    1. document.template_id (user template) - if set, use user template
+    2. document.template_name (system template) - if set, use system template
+    3. Default system template ("wtt_v1") - if neither is set
+    
     Args:
-        funding_program: FundingProgram model instance
+        document: Document model instance
         db: Database session (required for user templates)
-
+        user_email: User email (required for user template ownership verification)
+    
     Returns:
-        Template structure dictionary
-
+        Template structure dictionary with "sections" key
+    
     Raises:
         ValueError: If template cannot be resolved
     """
-    # Try new format first
-    if funding_program.template_source and funding_program.template_ref:
+    # Priority 1: User template (template_id)
+    if document.template_id:
+        logger.info(f"[TEMPLATE RESOLVER] Resolving user template from document.template_id: {document.template_id}")
+        if not user_email:
+            # Try to get user_email from document's company relationship
+            if hasattr(document, 'company') and document.company:
+                user_email = document.company.user_email
+            else:
+                raise ValueError("user_email required for user template resolution")
+        
         return resolve_template(
-            template_source=funding_program.template_source,
-            template_ref=funding_program.template_ref,
+            template_source="user",
+            template_ref=str(document.template_id),
             db=db,
-            user_email=funding_program.user_email
+            user_email=user_email
         )
-
-    # Fallback to legacy template_name
-    if funding_program.template_name:
-        logger.info(f"[TEMPLATE RESOLVER] Using legacy template_name: {funding_program.template_name}")
+    
+    # Priority 2: System template (template_name)
+    if document.template_name:
+        logger.info(f"[TEMPLATE RESOLVER] Resolving system template from document.template_name: {document.template_name}")
         return resolve_template(
             template_source="system",
-            template_ref=funding_program.template_name,
+            template_ref=document.template_name,
             db=db,
-            user_email=funding_program.user_email
+            user_email=user_email
         )
-
-    raise ValueError(f"Funding program {funding_program.id} has no template configured")
+    
+    # Priority 3: Default system template
+    logger.info(f"[TEMPLATE RESOLVER] No template specified in document, using default system template: wtt_v1")
+    try:
+        return resolve_template(
+            template_source="system",
+            template_ref="wtt_v1",  # Default system template
+            db=db,
+            user_email=user_email
+        )
+    except (KeyError, ValueError) as e:
+        logger.error(f"[TEMPLATE RESOLVER] Failed to resolve default template 'wtt_v1': {str(e)}")
+        raise ValueError(f"Default template 'wtt_v1' not available. Please specify a template for the document.") from e

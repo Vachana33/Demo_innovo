@@ -45,7 +45,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 from app.database import engine, Base  # noqa: E402
-from app.routers import auth, funding_programs, companies, documents, templates  # noqa: E402
+from app.routers import auth, funding_programs, companies, documents, templates, alte_vorhabensbeschreibung  # noqa: E402
 
 # Create database tables
 # Note: In production (PostgreSQL on Render), use Alembic migrations instead
@@ -144,6 +144,7 @@ app.include_router(funding_programs.router, tags=["funding-programs"])
 app.include_router(companies.router, tags=["companies"])
 app.include_router(documents.router, tags=["documents"])
 app.include_router(templates.router, tags=["templates"])
+app.include_router(alte_vorhabensbeschreibung.router, tags=["alte-vorhabensbeschreibung"])
 
 # Serve frontend static files if dist directory exists (for production deployment)
 # Frontend dist directory should be copied to backend/static during Docker build

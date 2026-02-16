@@ -136,10 +136,21 @@ export default function DocumentsPage() {
     try {
       // Navigate to editor which will create the document
       const docType = "vorhaben"; // Default to vorhabensbeschreibung
-      let url = `/editor/${formCompanyId}/${docType}`;
+      const params = new URLSearchParams();
       if (formProgramId) {
-        url += `?funding_program_id=${formProgramId}`;
+        params.append("funding_program_id", formProgramId.toString());
       }
+      if (formTemplate) {
+        // Check if it's a UUID (user template) or system template name
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (uuidRegex.test(formTemplate)) {
+          params.append("template_id", formTemplate);
+        } else {
+          params.append("template_name", formTemplate);
+        }
+      }
+      const queryString = params.toString();
+      const url = `/editor/${formCompanyId}/${docType}${queryString ? `?${queryString}` : ""}`;
       navigate(url);
     } catch (error: unknown) {
       console.error("Error creating document:", error);
