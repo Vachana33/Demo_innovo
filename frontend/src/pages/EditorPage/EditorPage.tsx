@@ -100,6 +100,9 @@ export default function EditorPage() {
   // Preview state management
   const [previewContent, setPreviewContent] = useState<Record<string, string> | null>(null);
   const [previewSectionIds, setPreviewSectionIds] = useState<string[]>([]);
+  
+  // Store query parameters for document fetching
+  const documentQueryParamsRef = useRef<{ funding_program_id?: string; template_id?: string; template_name?: string }>({});
 
   const [showExportMenu, setShowExportMenu] = useState(false);
 
@@ -143,6 +146,13 @@ export default function EditorPage() {
         const fundingProgramId = urlParams.get('funding_program_id');
         const templateId = urlParams.get('template_id');
         const templateName = urlParams.get('template_name');
+        
+        // Store query parameters for later use
+        documentQueryParamsRef.current = {
+          funding_program_id: fundingProgramId || undefined,
+          template_id: templateId || undefined,
+          template_name: templateName || undefined
+        };
         
         // Build URL with query parameters
         const params = new URLSearchParams();
@@ -870,13 +880,38 @@ export default function EditorPage() {
       // Fetch updated document
       try {
         console.log(`Fetching updated document after confirming ${updatedSectionIds.length} section(s)`);
-        const updatedDocument = await apiGet<DocumentResponse>(
-          `/documents/${companyIdNum}/vorhabensbeschreibung`
-        );
+        
+        // Build URL with stored query parameters
+        const params = new URLSearchParams();
+        if (documentQueryParamsRef.current.funding_program_id) {
+          params.append('funding_program_id', documentQueryParamsRef.current.funding_program_id);
+        }
+        if (documentQueryParamsRef.current.template_id) {
+          params.append('template_id', documentQueryParamsRef.current.template_id);
+        }
+        if (documentQueryParamsRef.current.template_name) {
+          params.append('template_name', documentQueryParamsRef.current.template_name);
+        }
+        const queryString = params.toString();
+        const url = `/documents/${companyIdNum}/vorhabensbeschreibung${queryString ? `?${queryString}` : ''}`;
+        
+        const updatedDocument = await apiGet<DocumentResponse>(url);
         
         if (updatedDocument.content_json && updatedDocument.content_json.sections) {
           // Verify the sections were actually updated
           const updatedSections = updatedDocument.content_json.sections as Section[];
+          
+          // Defensive check: ensure we have sections
+          if (!Array.isArray(updatedSections) || updatedSections.length === 0) {
+            console.error("Updated document has empty or invalid sections array!");
+            clearPreview();
+            setChatMessages(prev => [...prev, {
+              role: "assistant",
+              text: "Fehler: Aktualisiertes Dokument hat keine gültigen Abschnitte. Bitte aktualisieren Sie die Seite."
+            }]);
+            return;
+          }
+          
           let allSectionsUpdated = true;
           
           for (const sectionId of updatedSectionIds) {
@@ -1690,54 +1725,101 @@ export default function EditorPage() {
                         }}>
                           Preview (not saved yet)
                         </div>
-                        {/* Original content (faded/strikethrough) */}
-                        {s.content && (
-                          <div style={{
-                            marginBottom: "0.8rem",
-                            paddingBottom: "0.8rem",
-                            borderBottom: "1px dashed #ccc"
-                          }}>
-                            <div style={{
-                              fontSize: "0.75rem",
-                              color: "#999",
-                              marginBottom: "0.3rem",
-                              fontWeight: "600"
-                            }}>
-                              Original:
+                        {/* For milestone tables, render the table component in preview */}
+                        {(s.id === "4.1" || s.type === "milestone_table") ? (
+                          <>
+                            {/* Original content (faded) */}
+                            {s.content && (
+                              <div style={{
+                                marginBottom: "0.8rem",
+                                paddingBottom: "0.8rem",
+                                borderBottom: "1px dashed #ccc",
+                                opacity: 0.6
+                              }}>
+                                <div style={{
+                                  fontSize: "0.75rem",
+                                  color: "#999",
+                                  marginBottom: "0.3rem",
+                                  fontWeight: "600"
+                                }}>
+                                  Original:
+                                </div>
+                                <MilestoneTable
+                                  sectionId={s.id}
+                                  content={s.content}
+                                  onContentChange={() => {}}
+                                />
+                              </div>
+                            )}
+                            {/* Suggested content (highlighted) */}
+                            <div>
+                              <div style={{
+                                fontSize: "0.75rem",
+                                color: "var(--brand-gold-dark)",
+                                marginBottom: "0.3rem",
+                                fontWeight: "600"
+                              }}>
+                                Suggested:
+                              </div>
+                              <MilestoneTable
+                                sectionId={s.id}
+                                content={previewContent[s.id]}
+                                onContentChange={() => {}}
+                              />
                             </div>
-                            <div style={{
-                              color: "#999",
-                              textDecoration: "line-through",
-                              opacity: 0.6,
-                              fontSize: "0.9rem",
-                              lineHeight: "1.5"
-                            }}>
-                              {s.content}
+                          </>
+                        ) : (
+                          <>
+                            {/* Original content (faded/strikethrough) */}
+                            {s.content && (
+                              <div style={{
+                                marginBottom: "0.8rem",
+                                paddingBottom: "0.8rem",
+                                borderBottom: "1px dashed #ccc"
+                              }}>
+                                <div style={{
+                                  fontSize: "0.75rem",
+                                  color: "#999",
+                                  marginBottom: "0.3rem",
+                                  fontWeight: "600"
+                                }}>
+                                  Original:
+                                </div>
+                                <div style={{
+                                  color: "#999",
+                                  textDecoration: "line-through",
+                                  opacity: 0.6,
+                                  fontSize: "0.9rem",
+                                  lineHeight: "1.5"
+                                }}>
+                                  {s.content}
+                                </div>
+                              </div>
+                            )}
+                            {/* Suggested content (highlighted) */}
+                            <div>
+                              <div style={{
+                                fontSize: "0.75rem",
+                                color: "var(--brand-gold-dark)",
+                                marginBottom: "0.3rem",
+                                fontWeight: "600"
+                              }}>
+                                Suggested:
+                              </div>
+                              <div style={{
+                                color: "var(--brand-text-dark)",
+                                backgroundColor: "#fff9e6",
+                                padding: "0.6rem",
+                                borderRadius: "4px",
+                                fontSize: "0.9rem",
+                                lineHeight: "1.5",
+                                whiteSpace: "pre-wrap"
+                              }}>
+                                {previewContent[s.id]}
+                              </div>
                             </div>
-                          </div>
+                          </>
                         )}
-                        {/* Suggested content (highlighted) */}
-                        <div>
-                          <div style={{
-                            fontSize: "0.75rem",
-                            color: "var(--brand-gold-dark)",
-                            marginBottom: "0.3rem",
-                            fontWeight: "600"
-                          }}>
-                            Suggested:
-                          </div>
-                          <div style={{
-                            color: "var(--brand-text-dark)",
-                            backgroundColor: "#fff9e6",
-                            padding: "0.6rem",
-                            borderRadius: "4px",
-                            fontSize: "0.9rem",
-                            lineHeight: "1.5",
-                            whiteSpace: "pre-wrap"
-                          }}>
-                            {previewContent[s.id]}
-                          </div>
-                        </div>
                       </div>
                     ) : (
                       // Section 4.1 should ALWAYS be a milestone table, regardless of type field or content

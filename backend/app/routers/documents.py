@@ -3024,11 +3024,18 @@ def export_document(
                     story.append(Spacer(1, 6))
 
                 # Handle milestone tables
-                if section_type == "milestone_table":
+                # Section 4.1 should ALWAYS be treated as milestone table, regardless of type field
+                section_id = section.get("id", "")
+                if section_type == "milestone_table" or section_id == "4.1":
                     try:
                         # Parse milestone JSON
                         if isinstance(content, str) and content.strip():
-                            milestone_data = json.loads(content)
+                            # Try to parse as JSON
+                            try:
+                                milestone_data = json.loads(content)
+                            except json.JSONDecodeError:
+                                # If it's not valid JSON, treat as empty
+                                milestone_data = {"milestones": [], "total_expenditure": None}
                         elif isinstance(content, dict):
                             milestone_data = content
                         else:
@@ -3188,6 +3195,7 @@ def export_document(
                 title = section.get("title", "")
                 content = section.get("content", "")
                 section_type = section.get("type", "text")
+                section_id = section.get("id", "")
 
                 if title:
                     title_para = docx.add_paragraph(title)
@@ -3197,11 +3205,18 @@ def export_document(
                     title_run.bold = True
 
                 # Handle milestone tables
-                if section_type == "milestone_table":
+                # Section 4.1 should ALWAYS be treated as milestone table, regardless of type field
+                if section_type == "milestone_table" or section_id == "4.1":
                     try:
                         # Parse milestone JSON
                         if isinstance(content, str) and content.strip():
-                            milestone_data = json.loads(content)
+                            # Try to parse as JSON
+                            try:
+                                milestone_data = json.loads(content)
+                            except json.JSONDecodeError:
+                                # If it's not valid JSON, treat as empty
+                                logger.warning(f"Failed to parse milestone JSON for section {section_id}: {content[:100]}")
+                                milestone_data = {"milestones": [], "total_expenditure": None}
                         elif isinstance(content, dict):
                             milestone_data = content
                         else:
@@ -3209,6 +3224,11 @@ def export_document(
 
                         milestones = milestone_data.get("milestones", [])
                         total_expenditure = milestone_data.get("total_expenditure", None)
+                        
+                        # Ensure milestones is a list
+                        if not isinstance(milestones, list):
+                            logger.warning(f"Milestones is not a list for section {section_id}, converting")
+                            milestones = []
 
                         if milestones:
                             # Create table
