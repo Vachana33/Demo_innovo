@@ -2982,8 +2982,10 @@ def export_document(
         try:
             from reportlab.lib.pagesizes import A4
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-            from reportlab.lib.enums import TA_LEFT
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+            from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+            from reportlab.lib import colors
+            from reportlab.lib.units import mm
 
             # Create PDF in memory
             buffer = io.BytesIO()
@@ -3015,27 +3017,138 @@ def export_document(
             for section in sections:
                 title = section.get("title", "")
                 content = section.get("content", "")
-
-                # Ensure content is a string (handle dict/other types)
-                if not isinstance(content, str):
-                    if isinstance(content, dict):
-                        # If content is a dict, convert to string representation
-                        content = str(content)
-                    elif content is None:
-                        content = ""
-                    else:
-                        content = str(content)
+                section_type = section.get("type", "text")
 
                 if title:
                     story.append(Paragraph(title, title_style))
                     story.append(Spacer(1, 6))
 
-                if content:
-                    # Escape HTML and convert newlines
-                    content_escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                    content_escaped = content_escaped.replace("\n", "<br/>")
-                    story.append(Paragraph(content_escaped, content_style))
-                    story.append(Spacer(1, 12))
+                # Handle milestone tables
+                if section_type == "milestone_table":
+                    try:
+                        # Parse milestone JSON
+                        if isinstance(content, str) and content.strip():
+                            milestone_data = json.loads(content)
+                        elif isinstance(content, dict):
+                            milestone_data = content
+                        else:
+                            milestone_data = {"milestones": [], "total_expenditure": None}
+
+                        milestones = milestone_data.get("milestones", [])
+                        total_expenditure = milestone_data.get("total_expenditure", None)
+
+                        if milestones:
+                            # Create table data
+                            table_data = []
+                            
+                            # Header row
+                            header_row = [
+                                Paragraph("<b>Meilenstein</b>", content_style),
+                                Paragraph("<b>erwartetes Ziel</b>", content_style),
+                                Paragraph("<b>erwarteter Zeitpunkt der Zielerreichung<br/>(TT.MM.JJJJ)</b>", content_style),
+                                Paragraph("<b>erwartete Ausgaben zum Zeitpunkt<br/>der Zielerreichung (EUR)</b>", content_style)
+                            ]
+                            table_data.append(header_row)
+
+                            # Helper function to format numbers in German format (1 500,08)
+                            def format_german_number(value: float) -> str:
+                                """Format number as German format: 1 500,08"""
+                                formatted = f"{value:,.2f}"  # US format: 1,500.08
+                                # Replace thousands comma with space, then decimal period with comma
+                                return formatted.replace(",", "X").replace(".", ",").replace("X", " ")
+
+                            # Data rows
+                            for milestone in milestones:
+                                expenditure = milestone.get("expected_expenditure", 0)
+                                row = [
+                                    Paragraph(str(milestone.get("milestone_number", "")), content_style),
+                                    Paragraph(str(milestone.get("expected_target", "")), content_style),
+                                    Paragraph(str(milestone.get("target_date", "")), content_style),
+                                    Paragraph(format_german_number(expenditure), content_style)
+                                ]
+                                table_data.append(row)
+
+                            # Total row
+                            total_value = total_expenditure if total_expenditure is not None else sum(
+                                m.get("expected_expenditure", 0) for m in milestones
+                            )
+                            total_row = [
+                                "",
+                                "",
+                                Paragraph("<b>erwartete Gesamtausgaben</b>", content_style),
+                                Paragraph(f"<b>{format_german_number(total_value)}</b>", content_style)
+                            ]
+                            table_data.append(total_row)
+
+                            # Create table with proper column widths
+                            col_widths = [20*mm, 60*mm, 50*mm, 50*mm]
+                            table = Table(table_data, colWidths=col_widths, repeatRows=1)
+
+                            # Style the table
+                            table.setStyle(TableStyle([
+                                # Header styling
+                                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                                ('ALIGN', (3, 1), (3, -1), 'RIGHT'),  # Right-align expenditure column
+                                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                                ('TOPPADDING', (0, 0), (-1, 0), 12),
+                                
+                                # Grid lines
+                                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                                ('LINEBELOW', (0, 0), (-1, 0), 2, colors.black),
+                                
+                                # Data row styling
+                                ('FONTNAME', (0, 1), (-1, -2), 'Helvetica'),
+                                ('FONTSIZE', (0, 1), (-1, -2), 10),
+                                ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, colors.lightgrey]),
+                                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                                ('TOPPADDING', (0, 1), (-1, -2), 8),
+                                ('BOTTOMPADDING', (0, 1), (-1, -2), 8),
+                                
+                                # Total row styling
+                                ('FONTNAME', (2, -1), (3, -1), 'Helvetica-Bold'),
+                                ('FONTSIZE', (2, -1), (3, -1), 10),
+                                ('LINEABOVE', (0, -1), (-1, -1), 2, colors.black),
+                                ('TOPPADDING', (0, -1), (-1, -1), 8),
+                                ('BOTTOMPADDING', (0, -1), (-1, -1), 8),
+                            ]))
+
+                            story.append(table)
+                            story.append(Spacer(1, 12))
+                        else:
+                            # Empty milestone table
+                            story.append(Paragraph("Keine Meilensteine definiert.", content_style))
+                            story.append(Spacer(1, 12))
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        logger.warning(f"Failed to parse milestone table for section {section.get('id', 'unknown')}: {str(e)}")
+                        # Fallback to text representation
+                        content_str = str(content) if content else ""
+                        content_escaped = content_str.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        story.append(Paragraph(content_escaped, content_style))
+                        story.append(Spacer(1, 12))
+                else:
+                    # Regular text section
+                    # Ensure content is a string (handle dict/other types)
+                    if not isinstance(content, str):
+                        if isinstance(content, dict):
+                            # If content is a dict, convert to string representation
+                            content = str(content)
+                        elif content is None:
+                            content = ""
+                        else:
+                            content = str(content)
+
+                    if content:
+                        # Escape HTML and convert newlines
+                        content_escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        content_escaped = content_escaped.replace("\n", "<br/>")
+                        story.append(Paragraph(content_escaped, content_style))
+                        story.append(Spacer(1, 12))
 
             # Build PDF
             doc.build(story)
@@ -3064,7 +3177,8 @@ def export_document(
     elif format.lower() == "docx" or format.lower() == "doc":
         try:
             from docx import Document as DocxDocument
-            from docx.shared import Pt
+            from docx.shared import Pt, Inches
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
 
             # Create DOCX document
             docx = DocxDocument()
@@ -3073,6 +3187,7 @@ def export_document(
             for section in sections:
                 title = section.get("title", "")
                 content = section.get("content", "")
+                section_type = section.get("type", "text")
 
                 if title:
                     title_para = docx.add_paragraph(title)
@@ -3081,13 +3196,106 @@ def export_document(
                     title_run.font.size = Pt(14)
                     title_run.bold = True
 
-                if content:
-                    content_para = docx.add_paragraph(content)
-                    content_para.style = 'Normal'
-                    for run in content_para.runs:
-                        run.font.size = Pt(11)
-                    # Add spacing after content
-                    docx.add_paragraph()
+                # Handle milestone tables
+                if section_type == "milestone_table":
+                    try:
+                        # Parse milestone JSON
+                        if isinstance(content, str) and content.strip():
+                            milestone_data = json.loads(content)
+                        elif isinstance(content, dict):
+                            milestone_data = content
+                        else:
+                            milestone_data = {"milestones": [], "total_expenditure": None}
+
+                        milestones = milestone_data.get("milestones", [])
+                        total_expenditure = milestone_data.get("total_expenditure", None)
+
+                        if milestones:
+                            # Create table
+                            table = docx.add_table(rows=1, cols=4)
+                            table.style = 'Light Grid Accent 1'
+
+                            # Header row
+                            header_cells = table.rows[0].cells
+                            header_cells[0].text = "Meilenstein"
+                            header_cells[1].text = "erwartetes Ziel"
+                            header_cells[2].text = "erwarteter Zeitpunkt der Zielerreichung (TT.MM.JJJJ)"
+                            header_cells[3].text = "erwartete Ausgaben zum Zeitpunkt der Zielerreichung (EUR)"
+
+                            # Make header bold
+                            for cell in header_cells:
+                                for paragraph in cell.paragraphs:
+                                    for run in paragraph.runs:
+                                        run.bold = True
+                                    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+                            # Helper function to format numbers in German format (1 500,08)
+                            def format_german_number(value: float) -> str:
+                                """Format number as German format: 1 500,08"""
+                                formatted = f"{value:,.2f}"  # US format: 1,500.08
+                                # Replace thousands comma with space, then decimal period with comma
+                                return formatted.replace(",", "X").replace(".", ",").replace("X", " ")
+
+                            # Add data rows
+                            for milestone in milestones:
+                                row_cells = table.add_row().cells
+                                row_cells[0].text = str(milestone.get("milestone_number", ""))
+                                row_cells[1].text = str(milestone.get("expected_target", ""))
+                                row_cells[2].text = str(milestone.get("target_date", ""))
+                                
+                                # Format expenditure with German number format
+                                expenditure = milestone.get("expected_expenditure", 0)
+                                row_cells[3].text = format_german_number(expenditure)
+                                
+                                # Right-align expenditure column
+                                row_cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+                            # Add total row
+                            total_value = total_expenditure if total_expenditure is not None else sum(
+                                m.get("expected_expenditure", 0) for m in milestones
+                            )
+                            total_row = table.add_row()
+                            total_cells = total_row.cells
+                            total_cells[0].text = ""
+                            total_cells[1].text = ""
+                            total_cells[2].text = "erwartete Gesamtausgaben"
+                            total_cells[3].text = format_german_number(total_value)
+
+                            # Make total row bold
+                            for cell in [total_cells[2], total_cells[3]]:
+                                for paragraph in cell.paragraphs:
+                                    for run in paragraph.runs:
+                                        run.bold = True
+                                    if cell == total_cells[3]:
+                                        paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+                            # Add spacing after table
+                            docx.add_paragraph()
+                        else:
+                            # Empty milestone table
+                            empty_para = docx.add_paragraph("Keine Meilensteine definiert.")
+                            empty_para.style = 'Normal'
+                            for run in empty_para.runs:
+                                run.font.size = Pt(11)
+                            docx.add_paragraph()
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        logger.warning(f"Failed to parse milestone table for section {section.get('id', 'unknown')}: {str(e)}")
+                        # Fallback to text representation
+                        content_str = str(content) if content else ""
+                        content_para = docx.add_paragraph(content_str)
+                        content_para.style = 'Normal'
+                        for run in content_para.runs:
+                            run.font.size = Pt(11)
+                        docx.add_paragraph()
+                else:
+                    # Regular text section
+                    if content:
+                        content_para = docx.add_paragraph(content)
+                        content_para.style = 'Normal'
+                        for run in content_para.runs:
+                            run.font.size = Pt(11)
+                        # Add spacing after content
+                        docx.add_paragraph()
 
             # Save to buffer
             buffer = io.BytesIO()
