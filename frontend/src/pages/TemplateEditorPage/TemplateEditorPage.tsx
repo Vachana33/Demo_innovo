@@ -39,12 +39,13 @@ export default function TemplateEditorPage() {
 
   // Load template if editing
   useEffect(() => {
-    if (isEditMode) {
+    if (isEditMode && id) {
       loadTemplate();
     } else {
       setIsLoading(false);
     }
-  }, [id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]); // Only depend on id - loadTemplate uses id from closure
 
   async function loadTemplate() {
     if (!id) return;
@@ -303,18 +304,18 @@ export default function TemplateEditorPage() {
       // Handle different formats
       let sectionsToAdd: Section[] = [];
       if (Array.isArray(parsed)) {
-        sectionsToAdd = parsed.map((s: any) => ({
-          id: s.id || String(sections.length + 1),
-          title: s.title || s.name || `${s.id || String(sections.length + 1)}. `,
-          content: s.content || "",
-          type: (s.type || "text") as "text" | "milestone_table"
+        sectionsToAdd = parsed.map((s: Record<string, unknown>) => ({
+          id: (s.id as string) || String(sections.length + 1),
+          title: (s.title as string) || (s.name as string) || `${(s.id as string) || String(sections.length + 1)}. `,
+          content: (s.content as string) || "",
+          type: ((s.type as string) || "text") as "text" | "milestone_table"
         }));
       } else if (parsed.sections && Array.isArray(parsed.sections)) {
-        sectionsToAdd = parsed.sections.map((s: any) => ({
-          id: s.id || String(sections.length + 1),
-          title: s.title || s.name || `${s.id || String(sections.length + 1)}. `,
-          content: s.content || "",
-          type: (s.type || "text") as "text" | "milestone_table"
+        sectionsToAdd = parsed.sections.map((s: Record<string, unknown>) => ({
+          id: (s.id as string) || String(sections.length + 1),
+          title: (s.title as string) || (s.name as string) || `${(s.id as string) || String(sections.length + 1)}. `,
+          content: (s.content as string) || "",
+          type: ((s.type as string) || "text") as "text" | "milestone_table"
         }));
       }
 

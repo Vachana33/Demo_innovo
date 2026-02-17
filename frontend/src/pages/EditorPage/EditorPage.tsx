@@ -269,7 +269,8 @@ export default function EditorPage() {
     }
 
     loadDocument();
-  }, [companyIdNum, docType]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyIdNum, docType]); // logout is stable from context, no need to include
 
   // Debounced save function
   const saveDocument = useCallback(async (sectionsToSave: Section[]) => {
@@ -298,7 +299,8 @@ export default function EditorPage() {
         setIsSaving(false);
       }
     }, 1000); // 1 second debounce
-  }, [documentId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentId]); // logout is stable from context, no need to include
 
   // Track section changes for undo/redo history
   // Save history when sections change (but not on initial load)
