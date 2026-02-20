@@ -173,11 +173,68 @@ def get_document(
 
         try:
             # Try to find document with funding_program_id
+            # Also check if template_id or template_name matches the request
             document = db.query(Document).filter(
                 Document.company_id == company_id,
                 Document.funding_program_id == funding_program_id,
                 Document.type == "vorhabensbeschreibung"
             ).first()
+            
+            # If document exists but template doesn't match, we should update it
+            # This handles the case where user selects a different template
+            if document and (template_id or template_name):
+                import uuid
+                needs_update = False
+                
+                if template_id:
+                    try:
+                        requested_template_id = uuid.UUID(template_id)
+                        if document.template_id != requested_template_id:
+                            logger.info(f"[TEMPLATE RESOLVER] Document {document.id} has template_id {document.template_id}, but user requested {template_id}. Updating template.")
+                            document.template_id = requested_template_id
+                            document.template_name = None  # Clear template_name if using template_id
+                            needs_update = True
+                    except ValueError:
+                        pass  # Invalid UUID, skip
+                
+                if template_name and not template_id:
+                    if document.template_name != template_name:
+                        logger.info(f"[TEMPLATE RESOLVER] Document {document.id} has template_name {document.template_name}, but user requested {template_name}. Updating template.")
+                        document.template_name = template_name
+                        document.template_id = None  # Clear template_id if using template_name
+                        needs_update = True
+                
+                if needs_update:
+                    # Re-resolve template and update document structure
+                    try:
+                        template = get_template_for_document(document, db, current_user.email)
+                        sections = template.get("sections", [])
+                        
+                        # Initialize milestone table for section 4.1 if present
+                        for section in sections:
+                            if section.get("id") == "4.1" and section.get("type") == "milestone_table":
+                                pass
+                            elif "content" not in section:
+                                section["content"] = ""
+                        
+                        # Preserve existing content if sections match by ID
+                        existing_sections = document.content_json.get("sections", [])
+                        if existing_sections:
+                            existing_by_id = {s.get("id"): s for s in existing_sections}
+                            for section in sections:
+                                section_id = section.get("id")
+                                if section_id in existing_by_id:
+                                    # Preserve existing content
+                                    section["content"] = existing_by_id[section_id].get("content", "")
+                        
+                        document.content_json = {"sections": sections}
+                        db.commit()
+                        db.refresh(document)
+                        logger.info(f"[TEMPLATE RESOLVER] Updated document {document.id} with new template structure")
+                    except Exception as template_error:
+                        logger.warning(f"Failed to update template structure for document {document.id}: {str(template_error)}")
+                        db.rollback()
+                        # Continue with existing document even if template update fails
         except ProgrammingError as e:
             # Handle case where funding_program_id column doesn't exist yet
             db.rollback()
@@ -607,6 +664,11 @@ def get_document(
             # If we can't even set it in memory, continue without it
             pass
 
+    # Convert UUID template_id to string for response serialization
+    if document and hasattr(document, 'template_id') and document.template_id:
+        # Convert UUID to string - FastAPI needs string for response schema
+        document.template_id = str(document.template_id)
+    
     return document
 
 @router.get("/documents", response_model=List[DocumentListItem])
@@ -729,6 +791,9 @@ def update_document(
     try:
         db.commit()
         db.refresh(document)
+        # Convert UUID template_id to string for response serialization
+        if document and hasattr(document, 'template_id') and document.template_id:
+            document.template_id = str(document.template_id)
         return document
     except Exception as e:
         db.rollback()
@@ -1484,7 +1549,11 @@ def generate_content(
     # Final refresh to ensure we return the latest state
     db.refresh(document)
     logger.info(f"Successfully completed content generation for document {document_id}: {successful_batches}/{len(batches)} batches succeeded")
-
+    
+    # Convert UUID template_id to string for response serialization
+    if document and hasattr(document, 'template_id') and document.template_id:
+        document.template_id = str(document.template_id)
+    
     return document
 
 
