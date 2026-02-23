@@ -49,8 +49,8 @@ export default function TemplatesPage() {
         fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:52',message:'Templates fetched',data:{systemCount:response.system?.length||0,userCount:response.user?.length||0},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
         // #endregion
 
-        setSystemTemplates(response.system || []);
-        setUserTemplates(response.user || []);
+        setSystemTemplates((response.system || []) as SystemTemplate[]);
+        setUserTemplates((response.user || []) as UserTemplate[]);
       } catch (error: unknown) {
         console.error("Error fetching templates:", error);
         // #region agent log
