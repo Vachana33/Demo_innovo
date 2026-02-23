@@ -23,17 +23,33 @@ jobs:
           python-version: "3.11"
 
       - name: Install backend dependencies
+        working-directory: backend
         run: |
-          cd backend
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Start backend
-        run: |
-          cd backend
-          JWT_SECRET_KEY=ci-secret uvicorn main:app --host 0.0.0.0 --port 8000 &
+        working-directory: backend
         env:
+          JWT_SECRET_KEY: ci-secret
           DATABASE_URL: sqlite:///./innovo.db
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
+      
+      - name: Wait for backend
+        run: |
+          python - <<'PY'
+          import time, urllib.request
+          url="http://localhost:8000/docs"
+          for i in range(60):
+              try:
+                  urllib.request.urlopen(url, timeout=2)
+                  print("Backend up")
+                  raise SystemExit(0)
+              except Exception:
+                  time.sleep(1)
+          raise SystemExit("Backend did not start")
+          PY
 
       # -------------------------
       # Setup Node (Frontend)
@@ -44,29 +60,27 @@ jobs:
           node-version: "20"
 
       - name: Install frontend dependencies
-        run: |
-          cd frontend
-          npm ci
+        working-directory: frontend
+        run: npm ci
 
       - name: Install Playwright browsers
-        run: |
-          cd frontend
-          npx playwright install --with-deps
+        working-directory: frontend
+        run: npx playwright install --with-deps
 
       - name: Start frontend
-        run: |
-          cd frontend
-          npm run dev &
-      
+        working-directory: frontend
+        run: npm run dev &
+
       - name: Wait for frontend
+        working-directory: frontend
         run: npx wait-on http://localhost:5173
 
       # -------------------------
       # Run E2E
       # -------------------------
       - name: Run Playwright tests
-        run: |
-          cd frontend
-          E2E_TEST_EMAIL=${{ secrets.E2E_TEST_EMAIL }} \
-          E2E_TEST_PASSWORD=${{ secrets.E2E_TEST_PASSWORD }} \
-          npm run test:e2e
+        working-directory: frontend
+        env:
+          E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+          E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}
+        run: npm run test:e2e
