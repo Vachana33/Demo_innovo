@@ -108,12 +108,4 @@ Default: http://localhost:5173. Set `VITE_API_URL=http://localhost:8000` if need
 
 ---
 
-## 9. Known Limitations
-
-- **Single-process background tasks**: No separate queue; BackgroundTasks run in-process. Not suitable for high concurrency or long queues.
-- **No version diff tracking**: content_json overwritten on save; no history or diff view.
-- **No evaluation harness**: No in-repo LLM eval or regression tests; prompts and behavior verified manually or via external tooling.
-
----
-
 **License**: Internal use only, Innovo Consulting.
