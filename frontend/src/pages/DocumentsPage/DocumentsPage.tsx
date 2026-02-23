@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
-import { apiGet } from "../../utils/api";
+import { apiGet, apiDelete } from "../../utils/api";
 import { debugLog } from "../../utils/debugLog";
 import styles from "./DocumentsPage.module.css";
 
@@ -46,12 +46,14 @@ export default function DocumentsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [openMenuId, setOpenMenuId] = useState<number | null>(null);
 
   const [formTitle, setFormTitle] = useState("");
   const [formCompanyId, setFormCompanyId] = useState<number | null>(null);
   const [formProgramId, setFormProgramId] = useState<number | null>(null);
   const [formTemplate, setFormTemplate] = useState<string>("");
-  const [userTemplates, setUserTemplates] = useState<Array<{ id: string; name: string }>>([]);
+  const [formTemplateType, setFormTemplateType] = useState<"system" | "user" | "">("");
+  const [availableTemplates, setAvailableTemplates] = useState<{system: Array<{id: string; name: string}>; user: Array<{id: string; name: string; description?: string}>}>({system: [], user: []});
 
   // Fetch data
   useEffect(() => {
@@ -64,15 +66,15 @@ export default function DocumentsPage() {
         // #region agent log
         debugLog("DocumentsPage.tsx:fetchData:BEFORE_API", "About to call APIs", {}, "D");
         // #endregion
-        const [documentsData, companiesData, programsData, userTemplatesData] = await Promise.all([
+        const [documentsData, companiesData, programsData, templatesData] = await Promise.all([
           apiGet<DocumentListItem[]>("/documents"),
           apiGet<Company[]>("/companies"),
           apiGet<FundingProgram[]>("/funding-programs"),
-          apiGet<Array<{ id: string; name: string }>>("/user-templates").catch(() => []),
+          apiGet<{system: Array<{id: string; name: string}>; user: Array<{id: string; name: string; description?: string}>}>("/templates/list"),
         ]);
         
         // #region agent log
-        debugLog("DocumentsPage.tsx:fetchData:AFTER_API", "API calls completed", { documentsCount: documentsData?.length || 0, companiesCount: companiesData?.length || 0, programsCount: programsData?.length || 0 }, "D");
+        debugLog("DocumentsPage.tsx:fetchData:AFTER_API", "API calls completed", { documentsCount: documentsData?.length || 0, companiesCount: companiesData?.length || 0, programsCount: programsData?.length || 0, templatesCount: (templatesData?.system?.length || 0) + (templatesData?.user?.length || 0) }, "D");
         // #endregion
         
         // Map DocumentListItem to Document format for display
@@ -100,7 +102,10 @@ export default function DocumentsPage() {
         setDocuments(mappedDocuments);
         setCompanies(companiesData);
         setFundingPrograms(programsData);
-        setUserTemplates(userTemplatesData || []);
+        setAvailableTemplates({
+          system: templatesData?.system ?? [],
+          user: templatesData?.user ?? [],
+        });
         // #region agent log
         debugLog("DocumentsPage.tsx:fetchData:SUCCESS", "Data fetch succeeded", {}, "D");
         // #endregion
@@ -119,6 +124,17 @@ export default function DocumentsPage() {
     fetchData();
   }, [logout]);
 
+  // Close menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside() {
+      if (openMenuId !== null) setOpenMenuId(null);
+    }
+    if (openMenuId !== null) {
+      document.addEventListener("click", handleClickOutside);
+      return () => document.removeEventListener("click", handleClickOutside);
+    }
+  }, [openMenuId]);
+
   // Filter documents
   const filteredDocuments = documents.filter((d) => {
     if (!searchTerm.trim()) return true;
@@ -134,6 +150,12 @@ export default function DocumentsPage() {
   async function handleCreateDraft(e: React.FormEvent) {
     e.preventDefault();
     if (!formTitle.trim() || !formCompanyId) return;
+
+    // When a template is selected, a funding program is required so the backend applies the template
+    if (formTemplate && !formProgramId) {
+      alert("Please select a funding program to use a template. The template will be applied to the document.");
+      return;
+    }
 
     setIsCreating(true);
     try {
@@ -181,6 +203,21 @@ export default function DocumentsPage() {
     if (type === "vorhabensbeschreibung") return "Vorhabensbeschreibung";
     if (type === "vorkalkulation") return "Vorkalkulation";
     return type;
+  }
+
+  // Delete document
+  async function handleDeleteDocument(doc: Document) {
+    if (!confirm("Delete this document? This cannot be undone.")) return;
+    try {
+      await apiDelete(`/documents/${doc.id}`);
+      setDocuments((prev) => prev.filter((d) => d.id !== doc.id));
+    } catch (error: unknown) {
+      console.error("Error deleting document:", error);
+      alert(error instanceof Error ? error.message : "Failed to delete document");
+      if (error instanceof Error && error.message.includes("Authentication required")) {
+        logout();
+      }
+    }
   }
 
   return (
@@ -236,32 +273,50 @@ export default function DocumentsPage() {
                   </h3>
                   <div className={styles.cardActions}>
                     <button
-                      onClick={() => {
-                        const docType = doc.type === "vorhabensbeschreibung" ? "vorhaben" : "vorkalkulation";
-                        let url = `/editor/${doc.company_id}/${docType}`;
-                        if (doc.funding_program_id) {
-                          url += `?funding_program_id=${doc.funding_program_id}`;
-                        }
-                        navigate(url);
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenuId(openMenuId === doc.id ? null : doc.id);
                       }}
-                      className={styles.editButton}
-                      title="Edit"
+                      className={styles.menuButton}
+                      title="More options"
                     >
-                      ✏️
+                      ⋮
                     </button>
-                    <button
-                      className={styles.deleteButton}
-                      title="Delete"
-                    >
-                      🗑️
-                    </button>
+                    {openMenuId === doc.id && (
+                      <div className={styles.menuDropdown}>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const docType = doc.type === "vorhabensbeschreibung" ? "vorhaben" : "vorkalkulation";
+                            const params = new URLSearchParams();
+                            if (doc.funding_program_id) {
+                              params.set("funding_program_id", String(doc.funding_program_id));
+                            }
+                            const qs = params.toString();
+                            navigate(`/editor/${doc.company_id}/${docType}${qs ? `?${qs}` : ""}`);
+                            setOpenMenuId(null);
+                          }}
+                          className={styles.menuItem}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteDocument(doc);
+                            setOpenMenuId(null);
+                          }}
+                          className={styles.menuItem}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
-                {doc.funding_program && (
-                  <p className={styles.cardProgram}>
-                    {doc.funding_program.title}
-                  </p>
-                )}
+                <p className={styles.cardProgram}>
+                  {doc.funding_program?.title ?? "—"}
+                </p>
                 <div className={styles.cardMeta}>
                   <span>{getDocumentTypeDisplay(doc.type)}</span>
                   <span>•</span>
@@ -346,28 +401,54 @@ export default function DocumentsPage() {
                   </option>
                 ))}
               </select>
+              {formTemplateType && (
+                <p className={styles.formHint}>
+                  Select a funding program above to apply the template to your document.
+                </p>
+              )}
               <label className={styles.formLabel}>
                 Template
               </label>
               <select
-                value={formTemplate}
-                onChange={(e) => setFormTemplate(e.target.value)}
+                value={formTemplateType}
+                onChange={(e) => {
+                  setFormTemplateType(e.target.value as "system" | "user" | "");
+                  setFormTemplate(""); // Reset template selection when type changes
+                }}
                 className={styles.formSelect}
+                style={{ marginBottom: formTemplateType ? "0.5rem" : "0" }}
               >
-                <option value="">Select template</option>
-                <optgroup label="System Templates">
-                  <option value="wtt_v1">WTT v1</option>
-                </optgroup>
-                {userTemplates.length > 0 && (
-                  <optgroup label="My Templates">
-                    {userTemplates.map((t) => (
+                <option value="">No template (use default)</option>
+                <option value="system">System Template</option>
+                <option value="user">My Templates</option>
+              </select>
+              {formTemplateType && (
+                <select
+                  value={formTemplate}
+                  onChange={(e) => setFormTemplate(e.target.value)}
+                  className={styles.formSelect}
+                >
+                  <option value="">Select a template...</option>
+                  {formTemplateType === "system" && availableTemplates.system.length > 0 ? (
+                    availableTemplates.system.map((t) => (
                       <option key={t.id} value={t.id}>
                         {t.name}
                       </option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
+                    ))
+                  ) : formTemplateType === "system" ? (
+                    <option value="" disabled>No system templates available</option>
+                  ) : null}
+                  {formTemplateType === "user" && availableTemplates.user.length > 0 ? (
+                    availableTemplates.user.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} {t.description ? `- ${t.description}` : ""}
+                      </option>
+                    ))
+                  ) : formTemplateType === "user" ? (
+                    <option value="" disabled>No user templates available</option>
+                  ) : null}
+                </select>
+              )}
               <div className={styles.dialogActions}>
                 <button
                   type="button"
@@ -377,6 +458,7 @@ export default function DocumentsPage() {
                     setFormCompanyId(null);
                     setFormProgramId(null);
                     setFormTemplate("");
+                    setFormTemplateType("");
                   }}
                   className={styles.cancelButton}
                   disabled={isCreating}

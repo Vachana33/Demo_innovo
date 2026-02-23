@@ -7,42 +7,55 @@ import styles from "./TemplatesPage.module.css";
 type SystemTemplate = {
   id: string;
   name: string;
-  source: string;
+  source: "system";
 };
 
 type UserTemplate = {
   id: string;
   name: string;
-  source: string;
   description?: string;
-  template_structure?: {
-    sections?: Array<Record<string, unknown>>;
-  };
+  source: "user";
 };
 
 export default function TemplatesPage() {
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:25',message:'TemplatesPage component rendering',data:{},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+
   const navigate = useNavigate();
   const { logout } = useAuth();
-  const [systemTemplates, setSystemTemplates] = useState<SystemTemplate[]>([]);
-  const [userTemplates, setUserTemplates] = useState<UserTemplate[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
+  const [systemTemplates, setSystemTemplates] = useState<SystemTemplate[]>([]);
+  const [userTemplates, setUserTemplates] = useState<UserTemplate[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
   // Fetch templates
   useEffect(() => {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:40',message:'Fetching templates',data:{},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+
     async function fetchTemplates() {
       try {
         setIsLoading(true);
-        const [templatesData, userTemplatesData] = await Promise.all([
-          apiGet<{ system: SystemTemplate[]; user: UserTemplate[] }>("/templates/list"),
-          apiGet<UserTemplate[]>("/user-templates"),
-        ]);
-        setSystemTemplates(templatesData.system || []);
-        setUserTemplates(userTemplatesData || []);
+        const response = await apiGet<{
+          system: Array<{ id: string; name: string; source: string }>;
+          user: Array<{ id: string; name: string; source: string; description?: string }>;
+        }>("/templates/list");
+
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:52',message:'Templates fetched',data:{systemCount:response.system?.length||0,userCount:response.user?.length||0},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+
+        setSystemTemplates(response.system || []);
+        setUserTemplates(response.user || []);
       } catch (error: unknown) {
         console.error("Error fetching templates:", error);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:60',message:'Error fetching templates',data:{error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
         if (error instanceof Error && error.message.includes("Authentication required")) {
           logout();
         }
@@ -69,6 +82,45 @@ export default function TemplatesPage() {
     );
   });
 
+  // Copy template content
+  async function handleCopyContent(template: SystemTemplate | UserTemplate) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:85',message:'Copying template content',data:{templateId:template.id,source:template.source},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+
+    try {
+      let templateData: { sections: any[] };
+      
+      if (template.source === "system") {
+        // Fetch system template structure
+        const response = await apiGet<{ sections: any[] }>(`/templates/system/${template.id}`);
+        templateData = response;
+      } else {
+        // Fetch user template
+        const response = await apiGet<{
+          id: string;
+          name: string;
+          description?: string;
+          template_structure: { sections: any[] };
+        }>(`/user-templates/${template.id}`);
+        templateData = response.template_structure;
+      }
+
+      // Serialize sections to JSON
+      const jsonContent = JSON.stringify(templateData.sections, null, 2);
+      
+      // Copy to clipboard
+      await navigator.clipboard.writeText(jsonContent);
+      alert("Template content copied to clipboard!");
+    } catch (error: unknown) {
+      console.error("Error copying template:", error);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:110',message:'Error copying template',data:{error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      alert(error instanceof Error ? error.message : "Failed to copy template content");
+    }
+  }
+
   // Delete user template
   async function handleDelete() {
     if (!deletingId) return;
@@ -89,94 +141,9 @@ export default function TemplatesPage() {
     }
   }
 
-  // Copy template content to clipboard
-  async function handleCopyContent(template: SystemTemplate | UserTemplate) {
-    try {
-      let sections: Array<Record<string, unknown>> = [];
-      let templateName = template.name;
-      
-      // Check if we already have sections in the template object
-      if ("template_structure" in template && template.template_structure) {
-        sections = template.template_structure.sections || [];
-      } else if ("sections" in template && Array.isArray(template.sections)) {
-        sections = template.sections;
-      }
-
-      // If we don't have sections, fetch them based on template type
-      if (sections.length === 0) {
-        if (template.source === "system") {
-          // Fetch system template
-          try {
-            const fullTemplate = await apiGet<{ template_name: string; sections: Array<Record<string, unknown>> }>(
-              `/templates/system/${template.id}`
-            );
-            sections = fullTemplate.sections || [];
-            templateName = fullTemplate.template_name || template.name;
-          } catch (error) {
-            console.error("Error fetching system template:", error);
-            alert("Could not fetch system template content. Please try again.");
-            return;
-          }
-        } else if (template.source === "user" && "id" in template && template.id) {
-          // Fetch user template
-          try {
-            const fullTemplate = await apiGet<{ name: string; template_structure: { sections: Array<Record<string, unknown>> } }>(
-              `/user-templates/${template.id}`
-            );
-            sections = fullTemplate.template_structure?.sections || [];
-            templateName = fullTemplate.name || template.name;
-          } catch (error) {
-            console.error("Error fetching user template:", error);
-            alert("Could not fetch template content. Please try again.");
-            return;
-          }
-        }
-      }
-
-      // If we still don't have sections, show error
-      if (sections.length === 0) {
-        alert("Template has no sections to copy.");
-        return;
-      }
-
-      // Copy sections as JSON
-      const templateData = {
-        name: templateName,
-        sections: sections.map((s: Record<string, unknown>) => ({
-          id: s.id,
-          title: s.title || s.name,
-          content: s.content || "",
-          type: s.type || "text"
-        }))
-      };
-      const jsonString = JSON.stringify(templateData, null, 2);
-      await navigator.clipboard.writeText(jsonString);
-      alert(`Template "${templateName}" content copied to clipboard! You can paste it when creating a new template.`);
-    } catch (error) {
-      console.error("Error copying template:", error);
-      alert("Failed to copy template content. Please try again.");
-    }
-  }
-
-  // Get sections preview
-  function getSectionsPreview(template: SystemTemplate | UserTemplate): string[] {
-    let sections: Array<Record<string, unknown>> = [];
-    
-    if ("template_structure" in template && template.template_structure) {
-      sections = template.template_structure.sections || [];
-    } else if ("sections" in template && Array.isArray(template.sections)) {
-      sections = template.sections;
-    }
-    
-    if (sections.length > 0) {
-      return sections.slice(0, 5).map((s: Record<string, unknown>) => {
-        const id = s.id || "";
-        const title = s.title || s.name || id;
-        return typeof title === "string" ? title : String(id);
-      });
-    }
-    return [];
-  }
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:135',message:'Rendering TemplatesPage',data:{systemCount:systemTemplates.length,userCount:userTemplates.length,isLoading},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
 
   return (
     <div className={styles.container}>
@@ -184,14 +151,14 @@ export default function TemplatesPage() {
         <div>
           <h1 className={styles.title}>Templates</h1>
           <p className={styles.subtitle}>
-            Standardized formats for grant applications.
+            Manage document templates for your projects.
           </p>
         </div>
         <button
           onClick={() => navigate("/templates/new")}
           className={styles.newButton}
         >
-          New Template
+          + New Template
         </button>
       </header>
 
@@ -205,103 +172,78 @@ export default function TemplatesPage() {
         />
       </div>
 
-      <div className={styles.templatesGrid}>
-        {isLoading ? (
-          <div className={styles.loading}>Loading templates...</div>
-        ) : (
-          <>
-            {/* System Templates */}
-            {filteredSystemTemplates.map((template) => {
-              const sections = getSectionsPreview(template);
-              return (
-                <div key={template.id} className={styles.templateCard}>
-                  <div className={styles.cardHeader}>
-                    <div className={styles.cardIcon}>📋</div>
-                    <div className={styles.cardTitleSection}>
-                      <h3 className={styles.cardTitle}>{template.name}</h3>
-                      <span className={styles.systemLabel}>System</span>
-                    </div>
-                  </div>
-                  {sections.length > 0 && (
-                    <div className={styles.cardSections}>
-                      {sections.map((section, idx) => (
-                        <div key={idx} className={styles.sectionItem}>
-                          {idx + 1}. {section}
-                        </div>
-                      ))}
-                      {sections.length >= 5 && <div className={styles.sectionItem}>...</div>}
-                    </div>
-                  )}
-                  <button
-                    onClick={() => handleCopyContent(template)}
-                    className={styles.copyButton}
-                  >
-                    <span className={styles.copyIcon}>📋</span>
-                    Copy Content
-                  </button>
+      {isLoading ? (
+        <div className={styles.loading}>Loading templates...</div>
+      ) : (
+        <div className={styles.templatesGrid}>
+          {/* System Templates */}
+          {filteredSystemTemplates.map((template) => (
+            <div key={template.id} className={styles.templateCard}>
+              <div className={styles.cardHeader}>
+                <div className={styles.cardIcon}>📋</div>
+                <div className={styles.cardTitleSection}>
+                  <h3 className={styles.cardTitle}>{template.name}</h3>
+                  <span className={styles.systemLabel}>System Template</span>
                 </div>
-              );
-            })}
-
-            {/* User Templates */}
-            {filteredUserTemplates.map((template) => {
-              const sections = getSectionsPreview(template);
-              return (
-                <div key={template.id} className={styles.templateCard}>
-                  <div className={styles.cardHeader}>
-                    <div className={styles.cardIcon}>📋</div>
-                    <div className={styles.cardTitleSection}>
-                      <h3 className={styles.cardTitle}>{template.name}</h3>
-                      {template.description && (
-                        <p className={styles.cardDescription}>{template.description}</p>
-                      )}
-                    </div>
-                  </div>
-                  {sections.length > 0 && (
-                    <div className={styles.cardSections}>
-                      {sections.map((section, idx) => (
-                        <div key={idx} className={styles.sectionItem}>
-                          {idx + 1}. {section}
-                        </div>
-                      ))}
-                      {sections.length >= 5 && <div className={styles.sectionItem}>...</div>}
-                    </div>
-                  )}
-                  <div className={styles.cardActions}>
-                    <button
-                      onClick={() => navigate(`/templates/${template.id}/edit`)}
-                      className={styles.editButton}
-                    >
-                      ✏️ Edit
-                    </button>
-                    <button
-                      onClick={() => handleCopyContent(template)}
-                      className={styles.copyButton}
-                    >
-                      <span className={styles.copyIcon}>📋</span>
-                      Copy Content
-                    </button>
-                    <button
-                      onClick={() => setDeletingId(template.id)}
-                      className={styles.deleteButton}
-                    >
-                      🗑️
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-
-            {filteredSystemTemplates.length === 0 && filteredUserTemplates.length === 0 && (
-              <div className={styles.empty}>
-                {systemTemplates.length === 0 && userTemplates.length === 0
-                  ? "No templates found. Create your first template!"
-                  : `No templates match "${searchTerm}"`}
               </div>
-            )}
-          </>
-        )}
-      </div>
+              <div className={styles.cardActions}>
+                <button
+                  onClick={() => handleCopyContent(template)}
+                  className={styles.copyButton}
+                >
+                  <span className={styles.copyIcon}>📋</span>
+                  Copy Content
+                </button>
+              </div>
+            </div>
+          ))}
+
+          {/* User Templates */}
+          {filteredUserTemplates.map((template) => (
+            <div key={template.id} className={styles.templateCard}>
+              <div className={styles.cardHeader}>
+                <div className={styles.cardIcon}>📝</div>
+                <div className={styles.cardTitleSection}>
+                  <h3 className={styles.cardTitle}>{template.name}</h3>
+                  {template.description && (
+                    <p className={styles.cardDescription}>{template.description}</p>
+                  )}
+                </div>
+              </div>
+              <div className={styles.cardActions}>
+                <button
+                  onClick={() => navigate(`/templates/${template.id}/edit`)}
+                  className={styles.editButton}
+                >
+                  ✏️ Edit
+                </button>
+                <button
+                  onClick={() => handleCopyContent(template)}
+                  className={styles.copyButton}
+                >
+                  <span className={styles.copyIcon}>📋</span>
+                  Copy Content
+                </button>
+                <button
+                  onClick={() => setDeletingId(template.id)}
+                  className={styles.deleteButton}
+                  title="Delete"
+                >
+                  🗑️
+                </button>
+              </div>
+            </div>
+          ))}
+
+          {filteredSystemTemplates.length === 0 && filteredUserTemplates.length === 0 && (
+            <div className={styles.empty}>
+              {systemTemplates.length === 0 && userTemplates.length === 0
+                ? "No templates found. Create your first template!"
+                : `No templates match "${searchTerm}"`}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Delete Confirmation */}
       {deletingId && (

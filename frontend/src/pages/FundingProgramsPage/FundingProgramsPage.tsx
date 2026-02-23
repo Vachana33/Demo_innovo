@@ -30,6 +30,7 @@ export default function FundingProgramsPage() {
   const [formWebsite, setFormWebsite] = useState("");
   const [formFiles, setFormFiles] = useState<File[]>([]);
   const [existingDocuments, setExistingDocuments] = useState<Array<{id: string; original_filename: string; file_type: string; file_size: number}>>([]);
+  const [documentsToDelete, setDocumentsToDelete] = useState<Set<string>>(new Set());
 
   // Fetch programs
   useEffect(() => {
@@ -124,6 +125,21 @@ export default function FundingProgramsPage() {
       });
       setPrograms((prev) => prev.map((p) => (p.id === editingId ? updated : p)));
       
+      // Delete documents that were marked for deletion
+      if (documentsToDelete.size > 0) {
+        setIsUploading(true);
+        try {
+          for (const docId of documentsToDelete) {
+            await apiDelete(`/funding-programs/${editingId}/documents/${docId}`);
+          }
+        } catch (deleteError: unknown) {
+          console.error("Error deleting documents:", deleteError);
+          alert(deleteError instanceof Error ? deleteError.message : "Failed to delete some documents");
+        } finally {
+          setIsUploading(false);
+        }
+      }
+      
       // Upload new files if any were selected
       if (formFiles.length > 0) {
         setIsUploading(true);
@@ -152,6 +168,7 @@ export default function FundingProgramsPage() {
       setFormWebsite("");
       setFormFiles([]);
       setExistingDocuments([]);
+      setDocumentsToDelete(new Set());
       setShowDialog(false);
     } catch (error: unknown) {
       console.error("Error updating program:", error);
@@ -191,6 +208,7 @@ export default function FundingProgramsPage() {
     setFormWebsite(program.website || "");
     setFormFiles([]);
     setExistingDocuments([]);
+    setDocumentsToDelete(new Set());
     setOpenMenuId(null);
     setShowDialog(true);
     
@@ -204,6 +222,19 @@ export default function FundingProgramsPage() {
       console.error("Error fetching documents:", error);
       // Don't show error to user - just continue without documents
     }
+  }
+
+  // Toggle document deletion
+  function toggleDocumentDelete(docId: string) {
+    setDocumentsToDelete(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(docId)) {
+        newSet.delete(docId);
+      } else {
+        newSet.add(docId);
+      }
+      return newSet;
+    });
   }
 
   // Format date
@@ -301,8 +332,8 @@ export default function FundingProgramsPage() {
                         className={styles.menuItem}
                       >
                         Edit
-                      </button>
-                      <button
+                  </button>
+                  <button
                         onClick={(e) => {
                           e.stopPropagation();
                           setDeletingId(program.id);
@@ -311,7 +342,7 @@ export default function FundingProgramsPage() {
                         className={styles.menuItem}
                       >
                         Delete
-                      </button>
+                  </button>
                     </div>
                   )}
                 </div>
@@ -373,11 +404,41 @@ export default function FundingProgramsPage() {
               {editingId && existingDocuments.length > 0 && (
                 <div className={styles.fileList}>
                   <div style={{ marginBottom: "0.5rem", fontWeight: 500 }}>Existing documents:</div>
-                  {existingDocuments.map((doc) => (
-                    <div key={doc.id} className={styles.fileItem}>
-                      📄 {doc.original_filename} ({(doc.file_size / 1024).toFixed(1)} KB)
-                    </div>
-                  ))}
+                  {existingDocuments.map((doc) => {
+                    const isMarkedForDelete = documentsToDelete.has(doc.id);
+                    return (
+                      <div 
+                        key={doc.id} 
+                        className={styles.fileItem}
+                        style={{
+                          opacity: isMarkedForDelete ? 0.5 : 1,
+                          textDecoration: isMarkedForDelete ? "line-through" : "none",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "0.5rem"
+                        }}
+                      >
+                        <span>📄 {doc.original_filename} ({(doc.file_size / 1024).toFixed(1)} KB)</span>
+                        <button
+                          type="button"
+                          onClick={() => toggleDocumentDelete(doc.id)}
+                          style={{
+                            padding: "0.25rem 0.5rem",
+                            border: "1px solid #dc3545",
+                            backgroundColor: isMarkedForDelete ? "#dc3545" : "#fff",
+                            color: isMarkedForDelete ? "#fff" : "#dc3545",
+                            borderRadius: "4px",
+                            cursor: "pointer",
+                            fontSize: "0.75rem"
+                          }}
+                          title={isMarkedForDelete ? "Restore document" : "Delete document"}
+                        >
+                          {isMarkedForDelete ? "✓ Restore" : "🗑️ Delete"}
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
               <input
@@ -408,8 +469,8 @@ export default function FundingProgramsPage() {
                     setEditingId(null);
                     setFormTitle("");
                     setFormWebsite("");
-                   
                     setFormFiles([]);
+                    setDocumentsToDelete(new Set());
                   }}
                   className={styles.cancelButton}
                   disabled={isCreating || isUpdating || isUploading}

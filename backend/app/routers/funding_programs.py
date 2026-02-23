@@ -204,7 +204,7 @@ def delete_funding_program(
         # #region agent log
         logger.info(f"[DELETE] Deleted {program_deleted} funding_program record, committing...")
         # #endregion
-        
+
         db.commit()
         # #region agent log
         logger.info(f"[DELETE] Successfully deleted funding_program_id={funding_program_id}")

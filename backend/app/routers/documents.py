@@ -173,68 +173,11 @@ def get_document(
 
         try:
             # Try to find document with funding_program_id
-            # Also check if template_id or template_name matches the request
             document = db.query(Document).filter(
                 Document.company_id == company_id,
                 Document.funding_program_id == funding_program_id,
                 Document.type == "vorhabensbeschreibung"
             ).first()
-            
-            # If document exists but template doesn't match, we should update it
-            # This handles the case where user selects a different template
-            if document and (template_id or template_name):
-                import uuid
-                needs_update = False
-                
-                if template_id:
-                    try:
-                        requested_template_id = uuid.UUID(template_id)
-                        if document.template_id != requested_template_id:
-                            logger.info(f"[TEMPLATE RESOLVER] Document {document.id} has template_id {document.template_id}, but user requested {template_id}. Updating template.")
-                            document.template_id = requested_template_id
-                            document.template_name = None  # Clear template_name if using template_id
-                            needs_update = True
-                    except ValueError:
-                        pass  # Invalid UUID, skip
-                
-                if template_name and not template_id:
-                    if document.template_name != template_name:
-                        logger.info(f"[TEMPLATE RESOLVER] Document {document.id} has template_name {document.template_name}, but user requested {template_name}. Updating template.")
-                        document.template_name = template_name
-                        document.template_id = None  # Clear template_id if using template_name
-                        needs_update = True
-                
-                if needs_update:
-                    # Re-resolve template and update document structure
-                    try:
-                        template = get_template_for_document(document, db, current_user.email)
-                        sections = template.get("sections", [])
-                        
-                        # Initialize milestone table for section 4.1 if present
-                        for section in sections:
-                            if section.get("id") == "4.1" and section.get("type") == "milestone_table":
-                                pass
-                            elif "content" not in section:
-                                section["content"] = ""
-                        
-                        # Preserve existing content if sections match by ID
-                        existing_sections = document.content_json.get("sections", [])
-                        if existing_sections:
-                            existing_by_id = {s.get("id"): s for s in existing_sections}
-                            for section in sections:
-                                section_id = section.get("id")
-                                if section_id in existing_by_id:
-                                    # Preserve existing content
-                                    section["content"] = existing_by_id[section_id].get("content", "")
-                        
-                        document.content_json = {"sections": sections}
-                        db.commit()
-                        db.refresh(document)
-                        logger.info(f"[TEMPLATE RESOLVER] Updated document {document.id} with new template structure")
-                    except Exception as template_error:
-                        logger.warning(f"Failed to update template structure for document {document.id}: {str(template_error)}")
-                        db.rollback()
-                        # Continue with existing document even if template update fails
         except ProgrammingError as e:
             # Handle case where funding_program_id column doesn't exist yet
             db.rollback()
@@ -664,11 +607,6 @@ def get_document(
             # If we can't even set it in memory, continue without it
             pass
 
-    # Convert UUID template_id to string for response serialization
-    if document and hasattr(document, 'template_id') and document.template_id:
-        # Convert UUID to string - FastAPI needs string for response schema
-        document.template_id = str(document.template_id)
-    
     return document
 
 @router.get("/documents", response_model=List[DocumentListItem])
@@ -719,6 +657,44 @@ def list_documents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch documents: {str(e)}"
         ) from e
+
+
+@router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    Delete a document. Only allowed if the document's company belongs to the current user.
+    """
+    document = _safe_get_document_by_id(document_id, db)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    company = db.query(Company).filter(
+        Company.id == document.company_id,
+        Company.user_email == current_user.email
+    ).first()
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    try:
+        db.delete(document)
+        db.commit()
+        logger.info(f"Deleted document {document_id} for user {current_user.email}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete document {document_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete document"
+        ) from e
+
 
 @router.put(
     "/documents/{document_id}",
@@ -791,9 +767,6 @@ def update_document(
     try:
         db.commit()
         db.refresh(document)
-        # Convert UUID template_id to string for response serialization
-        if document and hasattr(document, 'template_id') and document.template_id:
-            document.template_id = str(document.template_id)
         return document
     except Exception as e:
         db.rollback()
@@ -1549,11 +1522,7 @@ def generate_content(
     # Final refresh to ensure we return the latest state
     db.refresh(document)
     logger.info(f"Successfully completed content generation for document {document_id}: {successful_batches}/{len(batches)} batches succeeded")
-    
-    # Convert UUID template_id to string for response serialization
-    if document and hasattr(document, 'template_id') and document.template_id:
-        document.template_id = str(document.template_id)
-    
+
     return document
 
 
@@ -2901,26 +2870,55 @@ def confirm_chat_edit(
 
     # Find the section to update
     section_found = False
+    section_to_update = None
     logger.info(f"Looking for section {confirmation.section_id} in document {document_id}")
     logger.info(f"Available section IDs: {[s.get('id') for s in sections]}")
 
     for section in sections:
         section_id = section.get("id", "")
         if section_id == confirmation.section_id:
-            # Update section content with confirmed content
-            old_content_length = len(section.get("content", ""))
-            section["content"] = confirmation.confirmed_content
+            section_to_update = section
             section_found = True
-            logger.info(f"Updating section {confirmation.section_id} with confirmed content (old length: {old_content_length}, new length: {len(confirmation.confirmed_content)})")
-            logger.info(f"New content preview: {confirmation.confirmed_content[:200]}...")
             break
 
-    if not section_found:
+    if not section_found or not section_to_update:
         logger.error(f"Section {confirmation.section_id} not found in document {document_id}. Available sections: {[s.get('id') for s in sections]}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Section {confirmation.section_id} not found in document. Available sections: {', '.join([s.get('id', '') for s in sections])}"
         )
+
+    # Only update content; never change section title.
+    # If the LLM included the section title as the first line of suggested content, strip it so we don't duplicate the title.
+    content_to_save = confirmation.confirmed_content
+    section_title = (section_to_update.get("title") or "").strip()
+    conf_section_id = confirmation.section_id or ""
+
+    if content_to_save and section_title:
+        lines = content_to_save.split("\n")
+        first_line = (lines[0] or "").strip()
+        # Strip first line only if it looks like the section heading (exact title or "1.3 Title" / "1.3. Title")
+        strip_first = False
+        if first_line == section_title:
+            strip_first = True
+        elif first_line == f"{conf_section_id} {section_title}" or first_line == f"{conf_section_id}. {section_title}":
+            strip_first = True
+        elif first_line.endswith(section_title):
+            rest = first_line[: -len(section_title)].strip().rstrip(".")
+            if rest == conf_section_id or not rest:
+                strip_first = True
+        # e.g. section_title "1.3. Branche und Leistungsangebot", LLM first line "1.3 Branche und Leistungsangebot"
+        elif conf_section_id and first_line.startswith(conf_section_id):
+            after_id = first_line[len(conf_section_id):].strip().lstrip(".").strip()
+            if after_id == section_title or section_title.endswith(after_id) or after_id == section_title.replace(f"{conf_section_id}. ", "", 1):
+                strip_first = True
+        if strip_first and len(lines) > 1:
+            content_to_save = "\n".join(lines[1:]).strip()
+        elif strip_first:
+            content_to_save = ""
+
+    section_to_update["content"] = content_to_save
+    logger.info(f"Updating section {confirmation.section_id} with confirmed content (title unchanged, content length: {len(content_to_save)})")
 
     # Rebuild sections array preserving order
     # IMPORTANT: Verify the updated content is in the sections list before rebuilding
@@ -2931,24 +2929,27 @@ def confirm_chat_edit(
 
         # Log if this is the section we just updated
         if section_id == confirmation.section_id:
-            logger.info(f"Rebuilding section {section_id} with content length: {len(section_content)} (expected: {len(confirmation.confirmed_content)})")
-            if section_content != confirmation.confirmed_content:
+            logger.info(f"Rebuilding section {section_id} with content length: {len(section_content)} (expected: {len(content_to_save)})")
+            if section_content != content_to_save:
                 logger.error(f"ERROR: Section {section_id} content mismatch during rebuild! Setting correct content.")
-                section_content = confirmation.confirmed_content  # Force correct content
+                section_content = content_to_save  # Force correct content
 
-        updated_sections.append({
+        section_data = {
             "id": section_id,
             "title": section.get("title", ""),
             "content": section_content
-        })
+        }
+        if section.get("type") is not None:
+            section_data["type"] = section.get("type")
+        updated_sections.append(section_data)
 
     # Verify the updated section is in the rebuilt array
     rebuilt_section = next((s for s in updated_sections if s.get("id") == confirmation.section_id), None)
     if rebuilt_section:
         logger.info(f"Rebuilt section {confirmation.section_id} content length: {len(rebuilt_section.get('content', ''))}")
-        if rebuilt_section.get("content") != confirmation.confirmed_content:
+        if rebuilt_section.get("content") != content_to_save:
             logger.error("ERROR: Rebuilt section content doesn't match! Forcing correct content.")
-            rebuilt_section["content"] = confirmation.confirmed_content
+            rebuilt_section["content"] = content_to_save
 
     # Update document in database
     # IMPORTANT: Create a new dict to ensure SQLAlchemy detects the change
@@ -2972,10 +2973,10 @@ def confirm_chat_edit(
         if saved_section:
             saved_content = saved_section.get("content", "")
             logger.info(f"Successfully saved confirmed edit for section {confirmation.section_id} in document {document_id}")
-            logger.info(f"Verified saved content length: {len(saved_content)} (expected: {len(confirmation.confirmed_content)})")
-            if saved_content != confirmation.confirmed_content:
+            logger.info(f"Verified saved content length: {len(saved_content)} (expected: {len(content_to_save)})")
+            if saved_content != content_to_save:
                 logger.error("ERROR: Saved content does not match confirmed content!")
-                logger.error(f"Expected preview: {confirmation.confirmed_content[:200]}...")
+                logger.error(f"Expected preview: {content_to_save[:200]}...")
                 logger.error(f"Got preview: {saved_content[:200]}...")
                 # This is a critical error - raise an exception
                 raise HTTPException(
@@ -3093,18 +3094,11 @@ def export_document(
                     story.append(Spacer(1, 6))
 
                 # Handle milestone tables
-                # Section 4.1 should ALWAYS be treated as milestone table, regardless of type field
-                section_id = section.get("id", "")
-                if section_type == "milestone_table" or section_id == "4.1":
+                if section_type == "milestone_table":
                     try:
                         # Parse milestone JSON
                         if isinstance(content, str) and content.strip():
-                            # Try to parse as JSON
-                            try:
-                                milestone_data = json.loads(content)
-                            except json.JSONDecodeError:
-                                # If it's not valid JSON, treat as empty
-                                milestone_data = {"milestones": [], "total_expenditure": None}
+                            milestone_data = json.loads(content)
                         elif isinstance(content, dict):
                             milestone_data = content
                         else:
@@ -3264,7 +3258,6 @@ def export_document(
                 title = section.get("title", "")
                 content = section.get("content", "")
                 section_type = section.get("type", "text")
-                section_id = section.get("id", "")
 
                 if title:
                     title_para = docx.add_paragraph(title)
@@ -3274,18 +3267,11 @@ def export_document(
                     title_run.bold = True
 
                 # Handle milestone tables
-                # Section 4.1 should ALWAYS be treated as milestone table, regardless of type field
-                if section_type == "milestone_table" or section_id == "4.1":
+                if section_type == "milestone_table":
                     try:
                         # Parse milestone JSON
                         if isinstance(content, str) and content.strip():
-                            # Try to parse as JSON
-                            try:
-                                milestone_data = json.loads(content)
-                            except json.JSONDecodeError:
-                                # If it's not valid JSON, treat as empty
-                                logger.warning(f"Failed to parse milestone JSON for section {section_id}: {content[:100]}")
-                                milestone_data = {"milestones": [], "total_expenditure": None}
+                            milestone_data = json.loads(content)
                         elif isinstance(content, dict):
                             milestone_data = content
                         else:
@@ -3293,11 +3279,6 @@ def export_document(
 
                         milestones = milestone_data.get("milestones", [])
                         total_expenditure = milestone_data.get("total_expenditure", None)
-                        
-                        # Ensure milestones is a list
-                        if not isinstance(milestones, list):
-                            logger.warning(f"Milestones is not a list for section {section_id}, converting")
-                            milestones = []
 
                         if milestones:
                             # Create table

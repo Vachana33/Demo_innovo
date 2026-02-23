@@ -34,18 +34,15 @@ export default function TemplateEditorPage() {
   const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
   const [editingSectionTitle, setEditingSectionTitle] = useState("");
   const [showAddSectionMenu, setShowAddSectionMenu] = useState<string | null>(null);
-  const [pasteDialogOpen, setPasteDialogOpen] = useState(false);
-  const [pasteContent, setPasteContent] = useState("");
 
   // Load template if editing
   useEffect(() => {
-    if (isEditMode && id) {
+    if (isEditMode) {
       loadTemplate();
     } else {
       setIsLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]); // Only depend on id - loadTemplate uses id from closure
+  }, [id]);
 
   async function loadTemplate() {
     if (!id) return;
@@ -130,11 +127,6 @@ export default function TemplateEditorPage() {
   }
 
   function handleAddSectionBelow(sectionId: string, isMainSection: boolean) {
-    // Save current editing section if any
-    if (editingSectionId && editingSectionTitle !== "") {
-      handleSaveRenameSection(editingSectionId);
-    }
-
     const currentIndex = sections.findIndex(s => s.id === sectionId);
     if (currentIndex === -1) return;
 
@@ -221,10 +213,6 @@ export default function TemplateEditorPage() {
   }
 
   function handleStartRenameSection(section: Section) {
-    // Save current editing section if any
-    if (editingSectionId && editingSectionId !== section.id && editingSectionTitle !== "") {
-      handleSaveRenameSection(editingSectionId);
-    }
     setEditingSectionId(section.id);
     setEditingSectionTitle(section.title);
   }
@@ -246,11 +234,6 @@ export default function TemplateEditorPage() {
   }
 
   function handleMoveSection(sectionId: string, direction: "up" | "down") {
-    // Save current editing section if any
-    if (editingSectionId && editingSectionTitle !== "") {
-      handleSaveRenameSection(editingSectionId);
-    }
-
     const currentIndex = sections.findIndex(s => s.id === sectionId);
     if (currentIndex === -1) return;
 
@@ -266,83 +249,7 @@ export default function TemplateEditorPage() {
     setSections(renumbered);
   }
 
-  function handlePasteTemplate() {
-    setPasteDialogOpen(true);
-  }
-
-  function handleProcessPaste() {
-    try {
-      // Try to parse as JSON first
-      let parsed: { sections?: Section[] } | Section[];
-      try {
-        parsed = JSON.parse(pasteContent);
-      } catch {
-        // If not JSON, try to parse as plain text with section titles
-        const lines = pasteContent.split('\n').filter(line => line.trim());
-        parsed = lines.map((line, idx) => {
-          const trimmed = line.trim();
-          // Try to extract section number and title
-          const match = trimmed.match(/^(\d+(?:\.\d+)*)\.?\s*(.+)$/);
-          if (match) {
-            return {
-              id: match[1],
-              title: trimmed,
-              content: "",
-              type: "text" as const
-            };
-          } else {
-            return {
-              id: (idx + 1).toString(),
-              title: `${idx + 1}. ${trimmed}`,
-              content: "",
-              type: "text" as const
-            };
-          }
-        });
-      }
-
-      // Handle different formats
-      let sectionsToAdd: Section[] = [];
-      if (Array.isArray(parsed)) {
-        sectionsToAdd = parsed.map((s: Record<string, unknown>) => ({
-          id: (s.id as string) || String(sections.length + 1),
-          title: (s.title as string) || (s.name as string) || `${(s.id as string) || String(sections.length + 1)}. `,
-          content: (s.content as string) || "",
-          type: ((s.type as string) || "text") as "text" | "milestone_table"
-        }));
-      } else if (parsed.sections && Array.isArray(parsed.sections)) {
-        sectionsToAdd = parsed.sections.map((s: Record<string, unknown>) => ({
-          id: (s.id as string) || String(sections.length + 1),
-          title: (s.title as string) || (s.name as string) || `${(s.id as string) || String(sections.length + 1)}. `,
-          content: (s.content as string) || "",
-          type: ((s.type as string) || "text") as "text" | "milestone_table"
-        }));
-      }
-
-      if (sectionsToAdd.length > 0) {
-        // Save current editing section if any
-        if (editingSectionId && editingSectionTitle !== "") {
-          handleSaveRenameSection(editingSectionId);
-        }
-        setSections([...sections, ...sectionsToAdd]);
-        setPasteContent("");
-        setPasteDialogOpen(false);
-        alert(`Added ${sectionsToAdd.length} section(s) from pasted content.`);
-      } else {
-        alert("Could not parse pasted content. Please ensure it's valid JSON or plain text with section titles.");
-      }
-    } catch (error) {
-      console.error("Error parsing pasted content:", error);
-      alert("Error parsing pasted content. Please check the format and try again.");
-    }
-  }
-
   function handleAddMilestoneTable(sectionId: string) {
-    // Save current editing section if any
-    if (editingSectionId && editingSectionTitle !== "") {
-      handleSaveRenameSection(editingSectionId);
-    }
-
     const currentIndex = sections.findIndex(s => s.id === sectionId);
     if (currentIndex === -1) return;
 
@@ -376,15 +283,6 @@ export default function TemplateEditorPage() {
       <div className={styles.header}>
         <h1>{isEditMode ? "Edit Template" : "New Template"}</h1>
         <div className={styles.headerActions}>
-          {!isEditMode && (
-            <button
-              onClick={handlePasteTemplate}
-              className={styles.pasteBtn}
-              title="Paste template content from clipboard"
-            >
-              📋 Paste Template
-            </button>
-          )}
           <button
             onClick={() => navigate("/projects")}
             className={styles.cancelBtn}
@@ -471,14 +369,6 @@ export default function TemplateEditorPage() {
                               if (e.key === "Enter") {
                                 handleSaveRenameSection(s.id);
                               } else if (e.key === "Escape") {
-                                handleCancelRename();
-                              }
-                            }}
-                            onBlur={() => {
-                              // Save when clicking outside
-                              if (editingSectionTitle.trim()) {
-                                handleSaveRenameSection(s.id);
-                              } else {
                                 handleCancelRename();
                               }
                             }}
@@ -585,55 +475,6 @@ export default function TemplateEditorPage() {
           </div>
         </div>
       </div>
-
-      {/* Paste Template Dialog */}
-      {pasteDialogOpen && (
-        <div
-          className={styles.dialogOverlay}
-          onClick={() => {
-            setPasteDialogOpen(false);
-            setPasteContent("");
-          }}
-        >
-          <div
-            className={styles.dialogBox}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className={styles.dialogTitle}>Paste Template Content</h3>
-            <p style={{ marginBottom: "1rem", fontSize: "0.9rem", color: "#666" }}>
-              Paste the template content you copied. It can be JSON format or plain text with section titles.
-            </p>
-            <textarea
-              value={pasteContent}
-              onChange={(e) => setPasteContent(e.target.value)}
-              placeholder="Paste template content here..."
-              className={styles.textarea}
-              rows={10}
-              style={{ width: "100%", marginBottom: "1rem" }}
-            />
-            <div className={styles.dialogActions}>
-              <button
-                type="button"
-                onClick={() => {
-                  setPasteDialogOpen(false);
-                  setPasteContent("");
-                }}
-                className={styles.cancelButton}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleProcessPaste}
-                className={styles.submitButton}
-                disabled={!pasteContent.trim()}
-              >
-                Add Sections
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

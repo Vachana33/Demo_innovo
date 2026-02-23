@@ -52,5 +52,4 @@ htmlcov/
 # User uploads (should not be committed to repository)
 backend/uploads/
 frontend/uploads/
-uploads/# Ignore all Markdown files
-*.md
+uploads/

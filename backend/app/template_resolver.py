@@ -121,20 +121,20 @@ def get_template_for_document(
 ) -> Dict[str, Any]:
     """
     Resolve template from a Document object.
-    
+
     Template resolution priority:
     1. document.template_id (user template) - if set, use user template
     2. document.template_name (system template) - if set, use system template
     3. Default system template ("wtt_v1") - if neither is set
-    
+
     Args:
         document: Document model instance
         db: Database session (required for user templates)
         user_email: User email (required for user template ownership verification)
-    
+
     Returns:
         Template structure dictionary with "sections" key
-    
+
     Raises:
         ValueError: If template cannot be resolved
     """
@@ -154,7 +154,7 @@ def get_template_for_document(
             db=db,
             user_email=user_email
         )
-    
+
     # Priority 2: System template (template_name)
     if document.template_name:
         logger.info(f"[TEMPLATE RESOLVER] Resolving system template from document.template_name: {document.template_name}")

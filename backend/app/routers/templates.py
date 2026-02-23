@@ -76,6 +76,28 @@ def get_template_for_funding_program(
         ) from e
 
 
+@router.get("/templates/system/{template_name}", response_model=TemplateResponse)
+def get_system_template(
+    template_name: str,
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """
+    Get the full structure of a system template by name.
+    Used for copying system template content.
+    """
+    try:
+        template = get_template(template_name)
+        return TemplateResponse(
+            template_name=template_name,
+            sections=template.get("sections", [])
+        )
+    except KeyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"System template '{template_name}' not found"
+        ) from e
+
+
 # UserTemplate CRUD endpoints
 @router.post("/user-templates", response_model=UserTemplateResponse, status_code=status.HTTP_201_CREATED)
 def create_user_template(
@@ -333,25 +355,3 @@ def list_all_templates(
         "system": system_templates,
         "user": user_template_list
     }
-
-
-@router.get("/templates/system/{template_name}", response_model=TemplateResponse)
-def get_system_template(
-    template_name: str,
-    current_user: User = Depends(get_current_user)  # noqa: B008
-):
-    """
-    Get a system template by name.
-    Returns the full template structure with sections.
-    """
-    try:
-        template = get_template(template_name)
-        return TemplateResponse(
-            template_name=template_name,
-            sections=template.get("sections", [])
-        )
-    except KeyError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"System template '{template_name}' not found"
-        ) from e

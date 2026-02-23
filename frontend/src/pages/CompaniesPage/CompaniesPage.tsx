@@ -36,7 +36,6 @@ export default function CompaniesPage() {
   const [isCreating, setIsCreating] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [openMenuId, setOpenMenuId] = useState<number | null>(null);
 
   const [formName, setFormName] = useState("");
   const [formWebsite, setFormWebsite] = useState("");
@@ -45,6 +44,9 @@ export default function CompaniesPage() {
   const [companyDocuments, setCompanyDocuments] = useState<Record<number, CompanyDocument[]>>({});
   const [isUploadingDocuments, setIsUploadingDocuments] = useState(false);
   const [isLoadingDocuments, setIsLoadingDocuments] = useState<Record<number, boolean>>({});
+  const [documentsToDelete, setDocumentsToDelete] = useState<Record<number, Set<string>>>({});
+  const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  const [audioToRemove, setAudioToRemove] = useState(false);
 
   // Fetch companies
   useEffect(() => {
@@ -116,26 +118,44 @@ export default function CompaniesPage() {
 
     setIsUpdating(true);
     try {
-      let audioPath: string | undefined = undefined;
+      let audioPath: string | null | undefined = undefined;
       if (formAudio) {
         const uploadData = await apiUploadFile("/upload-audio", formAudio) as { audio_path?: string };
-        audioPath = uploadData.audio_path;
+        audioPath = uploadData.audio_path ?? null;
+      } else if (audioToRemove) {
+        audioPath = null;
+      } else {
+        const company = companies.find((c) => c.id === editingId);
+        audioPath = company?.audio_path ?? null;
       }
 
       const updated = await apiPut<Company>(`/companies/${editingId}`, {
         name: formName.trim(),
         website: formWebsite.trim() || undefined,
-        audio_path: audioPath,
+        audio_path: audioPath ?? undefined,
       });
       setCompanies((prev) => prev.map((c) => (c.id === editingId ? updated : c)));
+      
+      // Delete documents that were marked for deletion
+      if (editingId && documentsToDelete[editingId] && documentsToDelete[editingId].size > 0) {
+        setIsUploadingDocuments(true);
+        try {
+          for (const docId of documentsToDelete[editingId]) {
+            await apiDelete(`/companies/${editingId}/documents/${docId}`);
+          }
+        } catch (deleteError: unknown) {
+          console.error("Error deleting documents:", deleteError);
+          alert(deleteError instanceof Error ? deleteError.message : "Failed to delete some documents");
+        } finally {
+          setIsUploadingDocuments(false);
+        }
+      }
       
       // Upload documents if any were selected
       if (formDocuments.length > 0) {
         setIsUploadingDocuments(true);
         try {
           await apiUploadFiles(`/companies/${editingId}/documents/upload`, formDocuments);
-          // Refresh documents list
-          await fetchCompanyDocuments(editingId);
         } catch (uploadError: unknown) {
           console.error("Error uploading documents:", uploadError);
           alert(uploadError instanceof Error ? uploadError.message : "Failed to upload documents");
@@ -144,11 +164,24 @@ export default function CompaniesPage() {
         }
       }
       
+      // Refresh documents list after updates
+      if (editingId) {
+        await fetchCompanyDocuments(editingId);
+      }
+      
       setEditingId(null);
       setFormName("");
       setFormWebsite("");
       setFormAudio(null);
       setFormDocuments([]);
+      setAudioToRemove(false);
+      if (editingId) {
+        setDocumentsToDelete(prev => {
+          const newState = { ...prev };
+          delete newState[editingId];
+          return newState;
+        });
+      }
       setShowDialog(false);
     } catch (error: unknown) {
       console.error("Error updating company:", error);
@@ -202,10 +235,24 @@ export default function CompaniesPage() {
     setFormWebsite(company.website || "");
     setFormAudio(null);
     setFormDocuments([]);
-    setOpenMenuId(null);
+    setAudioToRemove(false);
+    setDocumentsToDelete(prev => ({ ...prev, [company.id]: new Set() }));
     setShowDialog(true);
     // Fetch documents for this company
     await fetchCompanyDocuments(company.id);
+  }
+
+  // Toggle document deletion
+  function toggleDocumentDelete(companyId: number, docId: string) {
+    setDocumentsToDelete(prev => {
+      const newSet = new Set(prev[companyId] || []);
+      if (newSet.has(docId)) {
+        newSet.delete(docId);
+      } else {
+        newSet.add(docId);
+      }
+      return { ...prev, [companyId]: newSet };
+    });
   }
 
   // Close menu when clicking outside
@@ -268,6 +315,11 @@ export default function CompaniesPage() {
             <div key={company.id} className={styles.companyCard}>
               <div className={styles.cardHeader}>
                 <h3 className={styles.cardTitle}>{company.name}</h3>
+                <p>{new Date(company.created_at).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}</p>
                 <div className={styles.cardActions}>
                   <button
                     onClick={(e) => {
@@ -285,6 +337,7 @@ export default function CompaniesPage() {
                         onClick={(e) => {
                           e.stopPropagation();
                           openEditDialog(company);
+                          setOpenMenuId(null);
                         }}
                         className={styles.menuItem}
                       >
@@ -310,6 +363,7 @@ export default function CompaniesPage() {
                   target="_blank"
                   rel="noopener noreferrer"
                   className={styles.visitButton}
+                  onClick={(e) => e.stopPropagation()}
                 >
                   <span className={styles.visitIcon}>🌐</span>
                   Visit Website
@@ -344,6 +398,7 @@ export default function CompaniesPage() {
             setFormName("");
             setFormWebsite("");
             setFormAudio(null);
+            setAudioToRemove(false);
           }}
         >
           <div
@@ -372,6 +427,45 @@ export default function CompaniesPage() {
                 placeholder="https://..."
               />
               <label className={styles.formLabel}>Meeting Audio (optional)</label>
+              {editingId && (() => {
+                const company = companies.find((c) => c.id === editingId);
+                if (!company?.audio_path) return null;
+                const isMarkedForDelete = audioToRemove;
+                return (
+                  <div className={styles.fileList} style={{ marginBottom: "0.5rem" }}>
+                    <div style={{ fontWeight: 500, marginBottom: "0.5rem" }}>Existing:</div>
+                    <div
+                      className={styles.fileItem}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "0.5rem",
+                        opacity: isMarkedForDelete ? 0.5 : 1,
+                        textDecoration: isMarkedForDelete ? "line-through" : "none",
+                      }}
+                    >
+                      <span>🎙️ Meeting audio attached</span>
+                      <button
+                        type="button"
+                        onClick={() => setAudioToRemove((prev) => !prev)}
+                        style={{
+                          padding: "0.25rem 0.5rem",
+                          border: "1px solid #dc3545",
+                          backgroundColor: isMarkedForDelete ? "#dc3545" : "#fff",
+                          color: isMarkedForDelete ? "#fff" : "#dc3545",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          fontSize: "0.75rem",
+                        }}
+                        title={isMarkedForDelete ? "Restore audio" : "Delete audio"}
+                      >
+                        {isMarkedForDelete ? "✓ Restore" : "🗑️ Delete"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
               <input
                 type="file"
                 accept="audio/*"
@@ -379,6 +473,51 @@ export default function CompaniesPage() {
                 className={styles.formFile}
               />
               <label className={styles.formLabel}>Documents (optional)</label>
+              {editingId && isLoadingDocuments[editingId] && (
+                <div className={styles.loadingDocuments} style={{ marginBottom: "0.5rem" }}>
+                  Loading documents...
+                </div>
+              )}
+              {editingId && companyDocuments[editingId] && companyDocuments[editingId].length > 0 && (
+                <div className={styles.fileList} style={{ marginBottom: "0.5rem" }}>
+                  <div style={{ fontWeight: 500, marginBottom: "0.5rem" }}>Existing documents:</div>
+                  {companyDocuments[editingId].map((doc) => {
+                    const isMarkedForDelete = documentsToDelete[editingId]?.has(doc.id) || false;
+                    return (
+                      <div
+                        key={doc.id}
+                        className={styles.fileItem}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "0.5rem",
+                          opacity: isMarkedForDelete ? 0.5 : 1,
+                          textDecoration: isMarkedForDelete ? "line-through" : "none",
+                        }}
+                      >
+                        <span>📄 {doc.original_filename} ({(doc.file_size / 1024).toFixed(1)} KB)</span>
+                        <button
+                          type="button"
+                          onClick={() => toggleDocumentDelete(editingId, doc.id)}
+                          style={{
+                            padding: "0.25rem 0.5rem",
+                            border: "1px solid #dc3545",
+                            backgroundColor: isMarkedForDelete ? "#dc3545" : "#fff",
+                            color: isMarkedForDelete ? "#fff" : "#dc3545",
+                            borderRadius: "4px",
+                            cursor: "pointer",
+                            fontSize: "0.75rem",
+                          }}
+                          title={isMarkedForDelete ? "Restore document" : "Delete document"}
+                        >
+                          {isMarkedForDelete ? "✓ Restore" : "🗑️ Delete"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               <input
                 type="file"
                 multiple
@@ -390,22 +529,11 @@ export default function CompaniesPage() {
                 className={styles.formFile}
               />
               {formDocuments.length > 0 && (
-                <div style={{ marginTop: "0.5rem", fontSize: "0.9rem", color: "#666" }}>
-                  {formDocuments.length} file(s) selected
-                </div>
-              )}
-              {editingId && isLoadingDocuments[editingId] && (
-                    <div className={styles.loadingDocuments}>
-                  Loading documents...
-                </div>
-              )}
-
-              {editingId && companyDocuments[editingId] && companyDocuments[editingId].length > 0 && (
-                <div style={{ marginTop: "1rem", borderTop: "1px solid #ddd", paddingTop: "1rem" }}>
-                  <div style={{ fontWeight: 500, marginBottom: "0.5rem" }}>Existing Documents:</div>
-                  {companyDocuments[editingId].map((doc) => (
-                    <div key={doc.id} style={{ fontSize: "0.9rem", color: "#666", marginBottom: "0.25rem" }}>
-                      📄 {doc.original_filename} ({(doc.file_size / 1024).toFixed(1)} KB)
+                <div className={styles.fileList} style={{ marginTop: "0.5rem" }}>
+                  <div style={{ fontWeight: 500, marginBottom: "0.25rem" }}>New files to upload:</div>
+                  {formDocuments.map((file, idx) => (
+                    <div key={idx} className={styles.fileItem}>
+                      📄 {file.name} ({(file.size / 1024).toFixed(1)} KB)
                     </div>
                   ))}
                 </div>
@@ -419,6 +547,7 @@ export default function CompaniesPage() {
                     setFormName("");
                     setFormWebsite("");
                     setFormAudio(null);
+                    setAudioToRemove(false);
                   }}
                   className={styles.cancelButton}
                   disabled={isCreating || isUpdating}
