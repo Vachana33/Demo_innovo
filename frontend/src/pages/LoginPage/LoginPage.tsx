@@ -106,18 +106,20 @@ export default function LoginPage() {
     <div
       className={styles.container}
       style={{ backgroundImage: `url(${bgImage})` }}
+      data-testid="login-page"
     >
-      <img src={logo} alt="Innovo Logo" className={styles.logo} />
+      <img src={logo} alt="Innovo Logo" className={styles.logo} data-testid="login-logo" />
 
-      <div className={styles.box}>
-        <h1 className={styles.title}>Innovo Agent Login</h1>
+      <div className={styles.box} data-testid="login-box">
+        <h1 className={styles.title} data-testid="login-title">Innovo Agent Login</h1>
         <p className={styles.subtitle}>
           Internal workspace for funding projects.
         </p>
 
         {/* Mode toggle */}
-        <div className={styles.modeSwitch}>
+        <div className={styles.modeSwitch} data-testid="login-mode-switch">
           <button
+            data-testid="login-tab"
             className={mode === "login" ? styles.activeTab : styles.inactiveTab}
             onClick={() => {
               setMode("login");
@@ -128,6 +130,7 @@ export default function LoginPage() {
             Login
           </button>
           <button
+            data-testid="signup-tab"
             className={mode === "signup" ? styles.activeTab : styles.inactiveTab}
             onClick={() => {
               setMode("signup");
@@ -139,9 +142,10 @@ export default function LoginPage() {
           </button>
         </div>
 
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} data-testid="login-form">
           <label className={styles.label}>Email</label>
           <input
+            data-testid="login-email"
             className={styles.input}
             type="email"
             value={email}
@@ -151,6 +155,7 @@ export default function LoginPage() {
 
           <label className={styles.label}>Password</label>
           <input
+            data-testid="login-password"
             className={styles.input}
             type="password"
             value={password}
@@ -158,13 +163,14 @@ export default function LoginPage() {
             placeholder="••••••••"
           />
 
-          {error && <p className={styles.error}>{error}</p>}
-          {success && <p className={styles.success}>{success}</p>}
+          {error && <p className={styles.error} data-testid="login-error">{error}</p>}
+          {success && <p className={styles.success} data-testid="login-success">{success}</p>}
 
           <button 
             className={styles.submit} 
             type="submit"
             disabled={isLoading}
+            data-testid="login-submit"
           >
             {isLoading 
               ? "Processing..." 

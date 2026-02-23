@@ -53,3 +53,13 @@ htmlcov/
 backend/uploads/
 frontend/uploads/
 uploads/
+
+
+*.md
+!README.md
+
+.env.e2e
+
+playwright-report/
+test-results/
+.last-run.json

@@ -1240,11 +1240,11 @@ export default function EditorPage() {
   }
 
   return (
-    <div className={styles.editorContainer}>
+    <div className={styles.editorContainer} data-testid="editor-page">
       {/* LEFT SIDEBAR */}
-      <aside className={styles.sidebar}>
-        <h2 className={styles.companyName}>{companyName}</h2>
-        <p className={styles.documentLabel}>{documentLabel}</p>
+      <aside className={styles.sidebar} data-testid="editor-sidebar">
+        <h2 className={styles.companyName} data-testid="editor-company-name">{companyName}</h2>
+        <p className={styles.documentLabel} data-testid="editor-doc-label">{documentLabel}</p>
         {isSaving && <p style={{ fontSize: "0.8rem", color: "var(--brand-text-medium)", marginBottom: "0.5rem" }}>Saving...</p>}
 
         {editorMode !== null && sections.length > 0 && (
@@ -1364,11 +1364,11 @@ export default function EditorPage() {
           </div>
         </header>
 
-        <section className={styles.editorArea}>
+        <section className={styles.editorArea} data-testid="editor-main-area">
           {/* Document editor */}
-          <div className={styles.documentBox}>
+          <div className={styles.documentBox} data-testid="editor-document-box">
             {isLoading ? (
-              <p className={styles.noSectionsMessage}>Loading document...</p>
+              <p className={styles.noSectionsMessage} data-testid="editor-loading">Loading document...</p>
             ) : editorMode === null ? (
               <p className={styles.noSectionsMessage}>
                 Click <strong>AI: Create Headings</strong> in the Assistant panel to generate the
@@ -1563,6 +1563,7 @@ export default function EditorPage() {
                 })}
                 <div style={{ marginTop: "2rem", paddingTop: "1rem", borderTop: "1px solid var(--brand-border)" }}>
                   <button
+                    data-testid="editor-confirm-headings-btn"
                     onClick={handleConfirmHeadings}
                     className={styles.fillContentBtn}
                     style={{ 
@@ -1818,6 +1819,7 @@ export default function EditorPage() {
                           </p>
 
                           <button
+                            data-testid="editor-generate-content-btn"
                             onClick={handleAssistantCreateContent}
                             className={styles.fillContentBtn}
                             style={{ marginTop: "1rem" }}
@@ -1888,6 +1890,7 @@ export default function EditorPage() {
                           justifyContent: msg.role === "assistant" ? "flex-start" : "flex-end"
                         }}>
                           <button
+                            data-testid="editor-approve-edit-btn"
                             onClick={() => handleApproveEdit(msg.messageId!, msg.suggestedContent!)}
                             disabled={isChatLoading}
                             style={{
@@ -1904,6 +1907,7 @@ export default function EditorPage() {
                             Approve
                           </button>
                           <button
+                            data-testid="editor-reject-edit-btn"
                             onClick={() => handleRejectEdit()}
                             disabled={isChatLoading}
                             style={{
@@ -1935,10 +1939,11 @@ export default function EditorPage() {
 
             {/* Chat input - only show in headings or content mode */}
             {editorMode !== null && (
-              <div className={styles.chatInputArea}>
+              <div className={styles.chatInputArea} data-testid="editor-chat-area">
                 <button className={styles.plusBtn}>+</button>
 
                 <input
+                  data-testid="editor-chat-input"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -1956,6 +1961,7 @@ export default function EditorPage() {
                 />
 
                 <button
+                  data-testid="editor-chat-send-btn"
                   className={styles.sendBtn}
                   onClick={() => {
                     if (chatInput.trim() && !isChatLoading) {

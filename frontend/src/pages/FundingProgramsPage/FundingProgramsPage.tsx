@@ -262,7 +262,7 @@ export default function FundingProgramsPage() {
   }, [openMenuId]);
 
   return (
-    <div className={styles.container}>
+    <div className={styles.container} data-testid="page-funding-programs">
       <header className={styles.header}>
         <div>
           <h1 className={styles.title}>Funding Programs</h1>
@@ -271,6 +271,7 @@ export default function FundingProgramsPage() {
           </p>
         </div>
         <button
+          data-testid="funding-new-program-btn"
           onClick={() => {
             setEditingId(null);
             setFormTitle("");
@@ -287,6 +288,7 @@ export default function FundingProgramsPage() {
 
       <div className={styles.searchBar}>
         <input
+          data-testid="funding-search"
           type="text"
           placeholder="Search programs..."
           value={searchTerm}
@@ -295,24 +297,25 @@ export default function FundingProgramsPage() {
         />
       </div>
 
-      <div className={styles.programsGrid}>
+      <div className={styles.programsGrid} data-testid="funding-programs-list">
         {isLoading ? (
-          <div className={styles.loading}>Loading programs...</div>
+          <div className={styles.loading} data-testid="funding-loading">Loading programs...</div>
         ) : filteredPrograms.length === 0 ? (
-          <div className={styles.empty}>
+          <div className={styles.empty} data-testid="funding-empty">
             {programs.length === 0
               ? "No funding programs found. Create your first program!"
               : `No programs match "${searchTerm}"`}
           </div>
         ) : (
           filteredPrograms.map((program) => (
-            <div key={program.id} className={styles.programCard}>
+            <div key={program.id} className={styles.programCard} data-testid="funding-program-card">
               <div className={styles.cardHeader}>
                 <h3 className={styles.cardTitle}>{program.title}</h3>
                 <p>{formatDate(program.created_at)}</p>
 
                 <div className={styles.cardActions}>
                   <button
+                    data-testid={`funding-program-menu-${program.id}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       setOpenMenuId(openMenuId === program.id ? null : program.id);
@@ -323,8 +326,9 @@ export default function FundingProgramsPage() {
                     ⋮
                   </button>
                   {openMenuId === program.id && (
-                    <div className={styles.menuDropdown}>
+                    <div className={styles.menuDropdown} data-testid={`funding-program-menu-dropdown-${program.id}`}>
                       <button
+                        data-testid={`funding-program-edit-${program.id}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           openEditDialog(program);
@@ -334,6 +338,7 @@ export default function FundingProgramsPage() {
                         Edit
                   </button>
                   <button
+                        data-testid={`funding-program-delete-${program.id}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           setDeletingId(program.id);
@@ -367,6 +372,7 @@ export default function FundingProgramsPage() {
       {showDialog && (
         <div
           className={styles.dialogOverlay}
+          data-testid="funding-dialog-overlay"
           onClick={() => {
             setShowDialog(false);
             setEditingId(null);
@@ -378,15 +384,17 @@ export default function FundingProgramsPage() {
           <div
             className={styles.dialogBox}
             onClick={(e) => e.stopPropagation()}
+            data-testid="funding-dialog"
           >
             <h3 className={styles.dialogTitle}>
               {editingId ? "Edit Funding Program" : "New Funding Program"}
             </h3>
-            <form onSubmit={editingId ? handleUpdate : handleCreate}>
+            <form onSubmit={editingId ? handleUpdate : handleCreate} data-testid="funding-form">
               <label className={styles.formLabel}>
                 Title <span className={styles.required}>*</span>
               </label>
               <input
+                data-testid="funding-form-title"
                 value={formTitle}
                 onChange={(e) => setFormTitle(e.target.value)}
                 required
@@ -395,6 +403,7 @@ export default function FundingProgramsPage() {
               />
               <label className={styles.formLabel}>Website (optional)</label>
               <input
+                data-testid="funding-form-website"
                 value={formWebsite}
                 onChange={(e) => setFormWebsite(e.target.value)}
                 className={styles.formInput}
@@ -464,6 +473,7 @@ export default function FundingProgramsPage() {
               <div className={styles.dialogActions}>
                 <button
                   type="button"
+                  data-testid="funding-dialog-cancel"
                   onClick={() => {
                     setShowDialog(false);
                     setEditingId(null);
@@ -479,6 +489,7 @@ export default function FundingProgramsPage() {
                 </button>
                 <button
                   type="submit"
+                  data-testid="funding-dialog-submit"
                   className={styles.submitButton}
                   disabled={isCreating || isUpdating || isUploading}
                 >
@@ -502,17 +513,20 @@ export default function FundingProgramsPage() {
       {deletingId && (
         <div
           className={styles.dialogOverlay}
+          data-testid="funding-delete-dialog-overlay"
           onClick={() => setDeletingId(null)}
         >
           <div
             className={styles.dialogBox}
             onClick={(e) => e.stopPropagation()}
+            data-testid="funding-delete-dialog"
           >
             <h3 className={styles.dialogTitle}>Delete Funding Program</h3>
             <p>Are you sure you want to delete this funding program? This action cannot be undone.</p>
             <div className={styles.dialogActions}>
               <button
                 type="button"
+                data-testid="funding-delete-cancel"
                 onClick={() => setDeletingId(null)}
                 className={styles.cancelButton}
                 disabled={isDeleting}
@@ -521,6 +535,7 @@ export default function FundingProgramsPage() {
               </button>
               <button
                 type="button"
+                data-testid="funding-delete-confirm"
                 onClick={handleDelete}
                 className={styles.deleteConfirmButton}
                 disabled={isDeleting}

@@ -2,6 +2,24 @@
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
+## E2E tests (Playwright)
+
+Tests live in `tests/e2e/` and use **only** `getByTestId` selectors. The app must be running and the backend must be available.
+
+### Run locally
+
+1. **Start backend** (from repo root): `cd backend && uvicorn main:app --reload --port 8000`
+2. **Start frontend**: `npm run dev` (default http://localhost:5173)
+3. **Set env** (allowed email domain, e.g. `@innovo-consulting.de` or `@aiio.de`):
+   - `E2E_TEST_EMAIL` – e.g. `e2e@innovo-consulting.de`
+   - `E2E_TEST_PASSWORD` – password for that user (create via signup on login page if needed)
+4. **Run tests** (from `frontend/`):
+   - `npm run test:e2e` – headless
+   - `npm run test:e2e:ui` – Playwright UI
+   - `npm run test:e2e:headed` – headed browser
+
+Base URL is `http://localhost:5173` unless you set `PLAYWRIGHT_BASE_URL`. Config: `playwright.config.ts`.
+
 Currently, two official plugins are available:
 
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh

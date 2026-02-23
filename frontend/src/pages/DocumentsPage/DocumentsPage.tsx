@@ -221,7 +221,7 @@ export default function DocumentsPage() {
   }
 
   return (
-    <div className={styles.container}>
+    <div className={styles.container} data-testid="page-documents">
       <header className={styles.header}>
         <div>
           <h1 className={styles.title}>Documents</h1>
@@ -230,6 +230,7 @@ export default function DocumentsPage() {
           </p>
         </div>
         <button
+          data-testid="documents-new-btn"
           onClick={() => {
             setFormTitle("");
             setFormCompanyId(null);
@@ -245,6 +246,7 @@ export default function DocumentsPage() {
 
       <div className={styles.searchBar}>
         <input
+          data-testid="documents-search"
           type="text"
           placeholder="Search documents..."
           value={searchTerm}
@@ -253,18 +255,18 @@ export default function DocumentsPage() {
         />
       </div>
 
-      <div className={styles.documentsList}>
+      <div className={styles.documentsList} data-testid="documents-list">
         {isLoading ? (
-          <div className={styles.loading}>Loading documents...</div>
+          <div className={styles.loading} data-testid="documents-loading">Loading documents...</div>
         ) : filteredDocuments.length === 0 ? (
-          <div className={styles.empty}>
+          <div className={styles.empty} data-testid="documents-empty">
             {documents.length === 0
               ? "No documents found. Create your first document!"
               : `No documents match "${searchTerm}"`}
           </div>
         ) : (
           filteredDocuments.map((doc) => (
-            <div key={doc.id} className={styles.documentCard}>
+            <div key={doc.id} className={styles.documentCard} data-testid="document-card">
               <div className={styles.cardIcon}>📄</div>
               <div className={styles.cardContent}>
                 <div className={styles.cardHeader}>
@@ -273,6 +275,7 @@ export default function DocumentsPage() {
                   </h3>
                   <div className={styles.cardActions}>
                     <button
+                      data-testid={`document-menu-${doc.id}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         setOpenMenuId(openMenuId === doc.id ? null : doc.id);
@@ -283,8 +286,9 @@ export default function DocumentsPage() {
                       ⋮
                     </button>
                     {openMenuId === doc.id && (
-                      <div className={styles.menuDropdown}>
+                      <div className={styles.menuDropdown} data-testid={`document-menu-dropdown-${doc.id}`}>
                         <button
+                          data-testid={`document-edit-${doc.id}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             const docType = doc.type === "vorhabensbeschreibung" ? "vorhaben" : "vorkalkulation";
@@ -301,6 +305,7 @@ export default function DocumentsPage() {
                           Edit
                         </button>
                         <button
+                          data-testid={`document-delete-${doc.id}`}
                           onClick={(e) => {
                             e.stopPropagation();
                             handleDeleteDocument(doc);
@@ -333,6 +338,7 @@ export default function DocumentsPage() {
       {showCreateDialog && (
         <div
           className={styles.dialogOverlay}
+          data-testid="document-create-dialog-overlay"
           onClick={() => {
             setShowCreateDialog(false);
             setFormTitle("");
@@ -344,10 +350,12 @@ export default function DocumentsPage() {
           <div
             className={styles.dialogBox}
             onClick={(e) => e.stopPropagation()}
+            data-testid="document-create-dialog"
           >
             <div className={styles.dialogHeader}>
               <h3 className={styles.dialogTitle}>Create Document Draft</h3>
               <button
+                data-testid="document-create-dialog-close"
                 onClick={() => {
                   setShowCreateDialog(false);
                   setFormTitle("");
@@ -360,11 +368,12 @@ export default function DocumentsPage() {
                 ×
               </button>
             </div>
-            <form onSubmit={handleCreateDraft}>
+            <form onSubmit={handleCreateDraft} data-testid="document-create-form">
               <label className={styles.formLabel}>
                 Document Title
               </label>
               <input
+                data-testid="document-create-title"
                 value={formTitle}
                 onChange={(e) => setFormTitle(e.target.value)}
                 className={styles.formInput}
@@ -374,6 +383,7 @@ export default function DocumentsPage() {
                 Company <span className={styles.required}>*</span>
               </label>
               <select
+                data-testid="document-create-company"
                 value={formCompanyId || ""}
                 onChange={(e) => setFormCompanyId(e.target.value ? Number(e.target.value) : null)}
                 required
@@ -390,6 +400,7 @@ export default function DocumentsPage() {
                 Funding Program
               </label>
               <select
+                data-testid="document-create-program"
                 value={formProgramId || ""}
                 onChange={(e) => setFormProgramId(e.target.value ? Number(e.target.value) : null)}
                 className={styles.formSelect}
@@ -452,6 +463,7 @@ export default function DocumentsPage() {
               <div className={styles.dialogActions}>
                 <button
                   type="button"
+                  data-testid="document-create-cancel"
                   onClick={() => {
                     setShowCreateDialog(false);
                     setFormTitle("");
@@ -467,6 +479,7 @@ export default function DocumentsPage() {
                 </button>
                 <button
                   type="submit"
+                  data-testid="document-create-submit"
                   className={styles.submitButton}
                   disabled={isCreating || !formCompanyId}
                 >

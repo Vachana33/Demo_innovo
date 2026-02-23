@@ -269,7 +269,7 @@ export default function CompaniesPage() {
   }, [openMenuId]);
 
   return (
-    <div className={styles.container}>
+    <div className={styles.container} data-testid="page-companies">
       <header className={styles.header}>
         <div>
           <h1 className={styles.title}>Companies</h1>
@@ -278,6 +278,7 @@ export default function CompaniesPage() {
           </p>
         </div>
         <button
+          data-testid="companies-new-btn"
           onClick={() => {
             setEditingId(null);
             setFormName("");
@@ -293,6 +294,7 @@ export default function CompaniesPage() {
 
       <div className={styles.searchBar}>
         <input
+          data-testid="companies-search"
           type="text"
           placeholder="Search companies..."
           value={searchTerm}
@@ -301,18 +303,18 @@ export default function CompaniesPage() {
         />
       </div>
 
-      <div className={styles.companiesGrid}>
+      <div className={styles.companiesGrid} data-testid="companies-list">
         {isLoading ? (
-          <div className={styles.loading}>Loading companies...</div>
+          <div className={styles.loading} data-testid="companies-loading">Loading companies...</div>
         ) : filteredCompanies.length === 0 ? (
-          <div className={styles.empty}>
+          <div className={styles.empty} data-testid="companies-empty">
             {companies.length === 0
               ? "No companies found. Create your first company!"
               : `No companies match "${searchTerm}"`}
           </div>
         ) : (
           filteredCompanies.map((company) => (
-            <div key={company.id} className={styles.companyCard}>
+            <div key={company.id} className={styles.companyCard} data-testid="company-card">
               <div className={styles.cardHeader}>
                 <h3 className={styles.cardTitle}>{company.name}</h3>
                 <p>{new Date(company.created_at).toLocaleDateString("en-US", {
@@ -322,6 +324,7 @@ export default function CompaniesPage() {
                 })}</p>
                 <div className={styles.cardActions}>
                   <button
+                    data-testid={`company-menu-${company.id}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       setOpenMenuId(openMenuId === company.id ? null : company.id);
@@ -332,8 +335,9 @@ export default function CompaniesPage() {
                     ⋮
                   </button>
                   {openMenuId === company.id && (
-                    <div className={styles.menuDropdown}>
+                    <div className={styles.menuDropdown} data-testid={`company-menu-dropdown-${company.id}`}>
                       <button
+                        data-testid={`company-edit-${company.id}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           openEditDialog(company);
@@ -344,6 +348,7 @@ export default function CompaniesPage() {
                         Edit
                       </button>
                       <button
+                        data-testid={`company-delete-${company.id}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           setDeletingId(company.id);
@@ -392,6 +397,7 @@ export default function CompaniesPage() {
       {showDialog && (
         <div
           className={styles.dialogOverlay}
+          data-testid="company-dialog-overlay"
           onClick={() => {
             setShowDialog(false);
             setEditingId(null);
@@ -404,15 +410,17 @@ export default function CompaniesPage() {
           <div
             className={styles.dialogBox}
             onClick={(e) => e.stopPropagation()}
+            data-testid="company-dialog"
           >
             <h3 className={styles.dialogTitle}>
               {editingId ? "Edit Company" : "New Company"}
             </h3>
-            <form onSubmit={editingId ? handleUpdate : handleCreate}>
+            <form onSubmit={editingId ? handleUpdate : handleCreate} data-testid="company-form">
               <label className={styles.formLabel}>
                 Company Name <span className={styles.required}>*</span>
               </label>
               <input
+                data-testid="company-form-name"
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
                 required
@@ -421,6 +429,7 @@ export default function CompaniesPage() {
               />
               <label className={styles.formLabel}>Website (optional)</label>
               <input
+                data-testid="company-form-website"
                 value={formWebsite}
                 onChange={(e) => setFormWebsite(e.target.value)}
                 className={styles.formInput}
@@ -541,6 +550,7 @@ export default function CompaniesPage() {
               <div className={styles.dialogActions}>
                 <button
                   type="button"
+                  data-testid="company-dialog-cancel"
                   onClick={() => {
                     setShowDialog(false);
                     setEditingId(null);
@@ -556,6 +566,7 @@ export default function CompaniesPage() {
                 </button>
                 <button
                   type="submit"
+                  data-testid="company-dialog-submit"
                   className={styles.submitButton}
                   disabled={isCreating || isUpdating}
                 >
@@ -579,17 +590,20 @@ export default function CompaniesPage() {
       {deletingId && (
         <div
           className={styles.dialogOverlay}
+          data-testid="company-delete-dialog-overlay"
           onClick={() => setDeletingId(null)}
         >
           <div
             className={styles.dialogBox}
             onClick={(e) => e.stopPropagation()}
+            data-testid="company-delete-dialog"
           >
             <h3 className={styles.dialogTitle}>Delete Company</h3>
             <p>Are you sure you want to delete this company? This action cannot be undone.</p>
             <div className={styles.dialogActions}>
               <button
                 type="button"
+                data-testid="company-delete-cancel"
                 onClick={() => setDeletingId(null)}
                 className={styles.cancelButton}
                 disabled={isDeleting}
@@ -598,6 +612,7 @@ export default function CompaniesPage() {
               </button>
               <button
                 type="button"
+                data-testid="company-delete-confirm"
                 onClick={handleDelete}
                 className={styles.deleteConfirmButton}
                 disabled={isDeleting}

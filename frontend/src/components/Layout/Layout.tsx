@@ -60,9 +60,9 @@ export default function Layout({ children }: LayoutProps) {
   };
 
   return (
-    <div className={styles.container}>
+    <div className={styles.container} data-testid="layout">
       {/* Sidebar */}
-      <aside className={styles.sidebar}>
+      <aside className={styles.sidebar} data-testid="layout-sidebar">
         {/* Logo and App Name */}
         <div className={styles.logoSection}>
           <img src={logo} alt="Innovo Logo" className={styles.logo} />
@@ -70,7 +70,7 @@ export default function Layout({ children }: LayoutProps) {
         </div>
 
         {/* Navigation Items */}
-        <nav className={styles.nav}>
+        <nav className={styles.nav} data-testid="layout-nav">
           {navItems.map((item) => (
             <Link
               key={item.path}
@@ -78,6 +78,7 @@ export default function Layout({ children }: LayoutProps) {
               className={`${styles.navItem} ${
                 isActive(item.path) ? styles.navItemActive : ""
               }`}
+              data-testid={`nav-${item.path.slice(1)}`}
             >
               <span className={styles.navIcon}>{item.icon}</span>
               <span className={styles.navLabel}>{item.label}</span>
@@ -86,7 +87,7 @@ export default function Layout({ children }: LayoutProps) {
         </nav>
 
         {/* User Profile Section */}
-        <div className={styles.userSection}>
+        <div className={styles.userSection} data-testid="layout-user-section">
           <div className={styles.userAvatar}>{getUserInitials()}</div>
           <div className={styles.userInfo}>
             <div className={styles.userName}>User</div>
@@ -98,6 +99,7 @@ export default function Layout({ children }: LayoutProps) {
             onClick={handleLogout}
             className={styles.logoutButton}
             title="Log out"
+            data-testid="logout-btn"
           >
             →
           </button>
