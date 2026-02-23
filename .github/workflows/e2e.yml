@@ -1,0 +1,72 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # -------------------------
+      # Setup Python (Backend)
+      # -------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start backend
+        run: |
+          cd backend
+          JWT_SECRET_KEY=ci-secret uvicorn main:app --host 0.0.0.0 --port 8000 &
+        env:
+          DATABASE_URL: sqlite:///./innovo.db
+
+      # -------------------------
+      # Setup Node (Frontend)
+      # -------------------------
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Install Playwright browsers
+        run: |
+          cd frontend
+          npx playwright install --with-deps
+
+      - name: Start frontend
+        run: |
+          cd frontend
+          npm run dev &
+      
+      - name: Wait for frontend
+        run: npx wait-on http://localhost:5173
+
+      # -------------------------
+      # Run E2E
+      # -------------------------
+      - name: Run Playwright tests
+        run: |
+          cd frontend
+          E2E_TEST_EMAIL=${{ secrets.E2E_TEST_EMAIL }} \
+          E2E_TEST_PASSWORD=${{ secrets.E2E_TEST_PASSWORD }} \
+          npm run test:e2e
