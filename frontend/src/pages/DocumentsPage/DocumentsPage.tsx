@@ -23,6 +23,7 @@ type DocumentListItem = {
   funding_program_id?: number;
   funding_program_title?: string;
   type: string;
+  title?: string | null;
   updated_at: string;
 };
 
@@ -31,6 +32,7 @@ type Document = {
   company_id: number;
   funding_program_id?: number;
   type: string;
+  title?: string | null;
   updated_at: string;
   company?: Company;
   funding_program?: FundingProgram;
@@ -83,6 +85,7 @@ export default function DocumentsPage() {
           company_id: doc.company_id,
           funding_program_id: doc.funding_program_id,
           type: doc.type,
+          title: doc.title ?? undefined,
           updated_at: doc.updated_at,
           company: {
             id: doc.company_id,
@@ -142,6 +145,7 @@ export default function DocumentsPage() {
     return (
       d.company?.name.toLowerCase().includes(searchLower) ||
       d.funding_program?.title.toLowerCase().includes(searchLower) ||
+      (d.title && d.title.toLowerCase().includes(searchLower)) ||
       formTitle.toLowerCase().includes(searchLower)
     );
   });
@@ -173,6 +177,9 @@ export default function DocumentsPage() {
         } else {
           params.append("template_name", formTemplate);
         }
+      }
+      if (formTitle.trim()) {
+        params.append("title", formTitle.trim());
       }
       const queryString = params.toString();
       const url = `/editor/${formCompanyId}/${docType}${queryString ? `?${queryString}` : ""}`;
@@ -271,7 +278,7 @@ export default function DocumentsPage() {
               <div className={styles.cardContent}>
                 <div className={styles.cardHeader}>
                   <h3 className={styles.cardTitle}>
-                    {doc.company?.name || `Document ${doc.id}`}
+                    {doc.title || doc.company?.name || `Document ${doc.id}`}
                   </h3>
                   <div className={styles.cardActions}>
                     <button
@@ -293,11 +300,12 @@ export default function DocumentsPage() {
                             e.stopPropagation();
                             const docType = doc.type === "vorhabensbeschreibung" ? "vorhaben" : "vorkalkulation";
                             const params = new URLSearchParams();
+                            params.set("document_id", String(doc.id));
                             if (doc.funding_program_id) {
                               params.set("funding_program_id", String(doc.funding_program_id));
                             }
                             const qs = params.toString();
-                            navigate(`/editor/${doc.company_id}/${docType}${qs ? `?${qs}` : ""}`);
+                            navigate(`/editor/${doc.company_id}/${docType}?${qs}`);
                             setOpenMenuId(null);
                           }}
                           className={styles.menuItem}

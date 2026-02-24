@@ -125,6 +125,41 @@ def _safe_get_document_by_id(document_id: int, db: Session) -> Optional[Document
             raise
 
 @router.get(
+    "/documents/by-id/{document_id}",
+    response_model=DocumentResponse,
+)
+def get_document_by_id(
+    document_id: int,
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user),  # noqa: B008
+):
+    """
+    Load an existing document by id. Used when opening a document from the list.
+    Returns 404 if not found. Validates ownership via document's company.
+    """
+    document = _safe_get_document_by_id(document_id, db)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+    company = db.query(Company).filter(
+        Company.id == document.company_id,
+        Company.user_email == current_user.email,
+    ).first()
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+    if hasattr(document, "chat_history") and document.chat_history is None:
+        document.chat_history = []
+    elif not hasattr(document, "chat_history"):
+        document.chat_history = []
+    return document
+
+
+@router.get(
     "/documents/{company_id}/vorhabensbeschreibung",
     response_model=DocumentResponse
 )
@@ -133,18 +168,19 @@ def get_document(
     funding_program_id: Optional[int] = Query(None, description="Funding program ID"),
     template_id: Optional[str] = Query(None, description="User template ID (UUID)"),
     template_name: Optional[str] = Query(None, description="System template name (e.g., 'wtt_v1')"),
+    title: Optional[str] = Query(None, description="Optional document title when creating"),
     db: Session = Depends(get_db),  # noqa: B008
     current_user: User = Depends(get_current_user)  # noqa: B008
 ):
     """
-    Get or create a document for a company by type.
-    Uses funding_program_id to resolve template and create document if needed.
-    Supports legacy documents (funding_program_id=NULL) for backward compatibility.
-    Currently only supports "vorhabensbeschreibung".
+    Create a new document for a company (when funding_program_id is provided).
+    Does not reuse existing documents; always creates a new row.
+    Legacy: when funding_program_id is not provided, returns or creates the single legacy doc per company.
     """
     # Normalize optional query params (empty string -> None so template lookup is safe)
     template_id = (template_id.strip() if isinstance(template_id, str) else None) or None
     template_name = (template_name.strip() if isinstance(template_name, str) else None) or None
+    doc_title = (title.strip() if isinstance(title, str) and title else None) or None
 
     # Verify company exists and belongs to current user
     company = db.query(Company).filter(
@@ -162,7 +198,7 @@ def get_document(
     document = None
     chat_history_missing = False  # Track if we know chat_history column doesn't exist
 
-    # Case 1: funding_program_id provided - use template system
+    # Case 1: funding_program_id provided - always create a new document (no reuse)
     if funding_program_id:
         # Verify funding program exists and belongs to current user
         funding_program = db.query(FundingProgram).filter(
@@ -175,175 +211,82 @@ def get_document(
                 detail="Funding program not found"
             )
 
+        # Create new document from template (never reuse existing)
+        doc_template_id = None
+        doc_template_name = None
+
+        if template_id and str(template_id).strip():
+            try:
+                import uuid
+                doc_template_id = uuid.UUID(template_id)
+                logger.info(f"[TEMPLATE RESOLVER] Creating document with user template_id: {template_id}")
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid template_id format: {template_id}"
+                )
+        elif template_name and str(template_name).strip():
+            doc_template_name = template_name
+            logger.info(f"[TEMPLATE RESOLVER] Creating document with system template_name: {template_name}")
+
+        class TempDocument:
+            def __init__(self, template_id, template_name):
+                self.template_id = template_id
+                self.template_name = template_name
+
+        temp_document = TempDocument(doc_template_id, doc_template_name)
+
         try:
-            # Try to find document with funding_program_id
-            document = db.query(Document).filter(
-                Document.company_id == company_id,
-                Document.funding_program_id == funding_program_id,
-                Document.type == "vorhabensbeschreibung"
-            ).first()
-        except ProgrammingError as e:
-            # Handle case where funding_program_id column doesn't exist yet
-            db.rollback()
-            error_str = str(e.orig) if hasattr(e, 'orig') else str(e)
-            if 'funding_program_id' in error_str.lower() or 'undefinedcolumn' in error_str.lower():
-                logger.warning(f"funding_program_id column does not exist. Falling back to legacy document lookup for company {company_id}")
-                # Fall through to legacy document handling below
-                document = None
-            else:
-                raise
+            template = get_template_for_document(temp_document, db, current_user.email)
+        except ValueError as e:
+            logger.error(f"[TEMPLATE RESOLVER] Failed to resolve template: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Template not found or invalid: {str(e)}"
+            ) from None
+        except Exception as e:
+            logger.error(f"[TEMPLATE RESOLVER] Unexpected error resolving template: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Template not found or invalid: {str(e)}"
+            ) from e
 
-        # If not found, check for legacy document (funding_program_id=NULL)
-        if not document:
-            try:
-                legacy_doc = db.query(Document).filter(
-                    Document.company_id == company_id,
-                    Document.funding_program_id.is_(None),
-                    Document.type == "vorhabensbeschreibung"
-                ).first()
+        if not template or not isinstance(template, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Template not found"
+            )
 
-                # One-time upgrade: attach legacy document to funding program
-                if legacy_doc:
-                    try:
-                        legacy_doc.funding_program_id = funding_program_id
+        sections = template.get("sections", []) if isinstance(template.get("sections"), list) else []
 
-                        # Check if document needs template structure (empty or old structure)
-                        content_json = getattr(legacy_doc, "content_json", None)
-                        content_json = content_json if isinstance(content_json, dict) else {}
-                        existing_sections = content_json.get("sections", [])
-                        needs_template = len(existing_sections) == 0 or len(existing_sections) < 20
-
-                        if needs_template:
-                            # Populate with template structure using document's template
-                            try:
-                                template = get_template_for_document(legacy_doc, db, current_user.email)
-                                sections = (template.get("sections", []) if isinstance(template, dict) and template else [])
-
-                                # Initialize milestone table for section 4.1 if present
-                                for section in sections:
-                                    if section.get("id") == "4.1" and section.get("type") == "milestone_table":
-                                        # Content is already JSON string from template
-                                        pass
-                                    elif "content" not in section:
-                                        section["content"] = ""
-
-                                # Preserve existing content if sections match by ID
-                                if existing_sections:
-                                    existing_by_id = {s.get("id"): s for s in existing_sections}
-                                    for section in sections:
-                                        section_id = section.get("id")
-                                        if section_id in existing_by_id:
-                                            # Preserve existing content
-                                            section["content"] = existing_by_id[section_id].get("content", "")
-
-                                legacy_doc.content_json = {"sections": sections}
-                                template_info = f"template_id={legacy_doc.template_id}" if legacy_doc.template_id else f"template_name={legacy_doc.template_name or 'default'}"
-                                logger.info(f"[TEMPLATE RESOLVER] Populated legacy document {legacy_doc.id} with {template_info}")
-                            except Exception as template_error:
-                                logger.warning(f"Failed to populate template structure for legacy document {legacy_doc.id}: {str(template_error)}")
-                                # Continue with upgrade even if template population fails
-
-                        db.commit()
-                        db.refresh(legacy_doc)
-                        document = legacy_doc
-                        logger.info(f"Upgraded legacy document {legacy_doc.id} to funding_program_id={funding_program_id}")
-                    except Exception as e:
-                        db.rollback()
-                        logger.error(f"Failed to upgrade legacy document: {str(e)}")
-                        raise HTTPException(
-                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"Failed to upgrade legacy document: {str(e)}"
-                        ) from None
-            except ProgrammingError:
-                # Column doesn't exist, skip legacy upgrade
+        for section in sections:
+            if section.get("id") == "4.1" and section.get("type") == "milestone_table":
                 pass
+            elif "content" not in section:
+                section["content"] = ""
 
-        # If still no document, create from template
-        if not document:
-            # Determine template_id and template_name from query parameters
-            doc_template_id = None
-            doc_template_name = None
-
-            if template_id and str(template_id).strip():
-                # User template selected
-                try:
-                    import uuid
-                    doc_template_id = uuid.UUID(template_id)
-                    logger.info(f"[TEMPLATE RESOLVER] Creating document with user template_id: {template_id}")
-                except (ValueError, TypeError):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Invalid template_id format: {template_id}"
-                    )
-            elif template_name and str(template_name).strip():
-                # System template selected
-                doc_template_name = template_name
-                logger.info(f"[TEMPLATE RESOLVER] Creating document with system template_name: {template_name}")
-            # If neither is provided, will use default template
-            
-            # Resolve template first (before creating document) to validate template exists
-            # Create a temporary document-like object for template resolution
-            class TempDocument:
-                def __init__(self, template_id, template_name):
-                    self.template_id = template_id
-                    self.template_name = template_name
-            
-            temp_document = TempDocument(doc_template_id, doc_template_name)
-            
-            try:
-                template = get_template_for_document(temp_document, db, current_user.email)
-            except ValueError as e:
-                logger.error(f"[TEMPLATE RESOLVER] Failed to resolve template: {str(e)}")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Template not found or invalid: {str(e)}"
-                ) from None
-            except Exception as e:
-                logger.error(f"[TEMPLATE RESOLVER] Unexpected error resolving template: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Template not found or invalid: {str(e)}"
-                ) from e
-
-            if not template or not isinstance(template, dict):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Template not found"
-                )
-
-            # Convert template to document sections format
-            sections = template.get("sections", []) if isinstance(template.get("sections"), list) else []
-
-            # Initialize milestone table for section 4.1 if present
-            for section in sections:
-                if section.get("id") == "4.1" and section.get("type") == "milestone_table":
-                    # Content is already JSON string from template
-                    pass
-                elif "content" not in section:
-                    section["content"] = ""
-
-            # Create document with template fields and resolved sections
-            try:
-                document = Document(
-                    company_id=company_id,
-                    funding_program_id=funding_program_id,
-                    type="vorhabensbeschreibung",
-                    template_id=doc_template_id,
-                    template_name=doc_template_name,
-                    content_json={"sections": sections}
-                )
-                db.add(document)
-                db.commit()
-                db.refresh(document)
-                template_info = f"template_id={document.template_id}" if document.template_id else f"template_name={document.template_name or 'default'}"
-                logger.info(f"[TEMPLATE RESOLVER] Created document {document.id} from {template_info} for company {company_id}")
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Failed to create document from template: {str(e)}", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to create document: {str(e)}"
-                ) from e
+        try:
+            document = Document(
+                company_id=company_id,
+                funding_program_id=funding_program_id,
+                type="vorhabensbeschreibung",
+                template_id=doc_template_id,
+                template_name=doc_template_name,
+                title=doc_title,
+                content_json={"sections": sections}
+            )
+            db.add(document)
+            db.commit()
+            db.refresh(document)
+            template_info = f"template_id={document.template_id}" if document.template_id else f"template_name={document.template_name or 'default'}"
+            logger.info(f"[TEMPLATE RESOLVER] Created document {document.id} from {template_info} for company {company_id}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to create document from template: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create document: {str(e)}"
+            ) from e
 
     # Case 2: No funding_program_id provided - return legacy document
     else:
@@ -665,6 +608,7 @@ def list_documents(
                 funding_program_id=doc.funding_program_id,
                 funding_program_title=funding_program_title,
                 type=doc.type,
+                title=getattr(doc, "title", None),
                 updated_at=doc.updated_at
             ))
 

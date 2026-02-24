@@ -114,6 +114,7 @@ class DocumentResponse(BaseModel):
     headings_confirmed: bool = False  # Phase 2.6: Headings confirmation flag
     template_id: Optional[str] = None  # User template UUID (as string)
     template_name: Optional[str] = None  # System template name
+    title: Optional[str] = None  # Optional title to distinguish documents
     updated_at: datetime
 
     @field_validator("template_id", mode="before")
@@ -138,6 +139,7 @@ class DocumentListItem(BaseModel):
     funding_program_id: Optional[int] = None
     funding_program_title: Optional[str] = None
     type: str
+    title: Optional[str] = None  # Optional title to distinguish documents
     updated_at: datetime
 
     class Config:

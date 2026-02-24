@@ -106,12 +106,10 @@ class Document(Base):
     template_id = Column(UUID(as_uuid=True), ForeignKey("user_templates.id"), nullable=True, index=True)
     template_name = Column(String, nullable=True)  # System template name (e.g., "wtt_v1")
 
-    # UNIQUE constraint: one document per (company, funding_program, type)
-    __table_args__ = (
-        UniqueConstraint('company_id', 'funding_program_id', 'type', name='uq_document_company_program_type'),
-    )
+    # Optional title to distinguish multiple documents per (company, funding_program, type)
+    title = Column(String, nullable=True)
 
-    # Relationships
+    # Relationships (no unique constraint - multiple docs per company+program+type allowed)
     company = relationship("Company", backref="documents")
     funding_program = relationship("FundingProgram", backref="documents")
     template = relationship("UserTemplate", backref="documents")  # For user templates

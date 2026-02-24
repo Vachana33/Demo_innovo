@@ -137,99 +137,106 @@ export default function EditorPage() {
 
       try {
         setIsLoading(true);
-        
-        // Get parameters from URL (passed from DocumentsPage or ProjectsPage)
+
         const urlParams = new URLSearchParams(window.location.search);
-        const fundingProgramId = urlParams.get('funding_program_id');
-        const templateId = urlParams.get('template_id');
-        const templateName = urlParams.get('template_name');
-        
-        // Build URL with query parameters
+        const documentIdParam = urlParams.get("document_id");
+
+        if (documentIdParam) {
+          // Open existing document by id (from list "Edit")
+          const docId = parseInt(documentIdParam, 10);
+          if (!Number.isNaN(docId)) {
+            const data = await apiGet<DocumentResponse>(`/documents/by-id/${docId}`);
+            setDocumentId(data.id);
+            setHeadingsConfirmed(data.headings_confirmed || false);
+            let loadedSections: Section[] = [];
+            if (data.content_json && data.content_json.sections) {
+              loadedSections = data.content_json.sections;
+              setSections(loadedSections);
+              if (loadedSections.length > 0) {
+                const hasTextContent = loadedSections.some((s: Section) => {
+                  if (s.type === "milestone_table") return false;
+                  return s.content && s.content.trim() !== "";
+                });
+                if (hasTextContent) setEditorMode("editingContent");
+                else if (data.headings_confirmed) setEditorMode("confirmedHeadings");
+                else setEditorMode("reviewHeadings");
+              } else setEditorMode(null);
+            } else {
+              setSections([]);
+              setEditorMode(null);
+            }
+            if (data.chat_history && Array.isArray(data.chat_history)) {
+              const loadedMessages: ChatMessage[] = data.chat_history.map((msg: ChatHistoryMessage) => ({
+                role: msg.role as "user" | "assistant",
+                text: msg.text,
+                suggestedContent: msg.suggestedContent,
+                requiresConfirmation: msg.requiresConfirmation,
+                messageId: msg.messageId,
+              }));
+              setChatMessages(loadedMessages.length > 0 ? loadedMessages : []);
+            } else setChatMessages([]);
+            isInitialLoad.current = false;
+            if (loadedSections.length > 0) {
+              setHistoryPast([loadedSections.map((s) => ({ ...s }))]);
+              setHistoryFuture([]);
+            }
+            const companyData = await apiGet<CompanyResponse>(`/companies/${companyIdNum}`);
+            setCompanyName(companyData.name || "Company");
+            setCompanyProcessingStatus(companyData.processing_status || "pending");
+            setIsLoading(false);
+            return;
+          }
+        }
+
+        // Create new document: pass funding_program_id, template, title
+        const fundingProgramId = urlParams.get("funding_program_id");
+        const templateId = urlParams.get("template_id");
+        const templateName = urlParams.get("template_name");
+        const titleParam = urlParams.get("title");
+
         const params = new URLSearchParams();
-        if (fundingProgramId) {
-          params.append('funding_program_id', fundingProgramId);
-        }
-        if (templateId) {
-          params.append('template_id', templateId);
-        }
-        if (templateName) {
-          params.append('template_name', templateName);
-        }
+        if (fundingProgramId) params.append("funding_program_id", fundingProgramId);
+        if (templateId) params.append("template_id", templateId);
+        if (templateName) params.append("template_name", templateName);
+        if (titleParam) params.append("title", titleParam);
         const queryString = params.toString();
-        const url = `/documents/${companyIdNum}/vorhabensbeschreibung${queryString ? `?${queryString}` : ''}`;
-        
+        const url = `/documents/${companyIdNum}/vorhabensbeschreibung${queryString ? `?${queryString}` : ""}`;
+
         const data = await apiGet<DocumentResponse>(url);
         setDocumentId(data.id);
-        
-        // Phase 2.6: Load headings_confirmed flag
         setHeadingsConfirmed(data.headings_confirmed || false);
-        
-        // Extract sections from content_json
         let loadedSections: Section[] = [];
         if (data.content_json && data.content_json.sections) {
           loadedSections = data.content_json.sections;
           setSections(loadedSections);
-          // Determine mode: if TEXT sections have content, we're in editingContent mode (show chat); otherwise reviewHeadings or confirmedHeadings
-          // Milestone tables don't count as "content" for mode determination - they can be empty and still need heading confirmation
           if (loadedSections.length > 0) {
             const hasTextContent = loadedSections.some((s: Section) => {
-              // Only check text sections, ignore milestone tables for mode determination
-              if (s.type === "milestone_table") {
-                return false; // Milestone tables don't determine mode
-              }
-              // For text sections, check if content exists
+              if (s.type === "milestone_table") return false;
               return s.content && s.content.trim() !== "";
             });
-
-            // Prefer editingContent when content already exists (e.g. user generated content and came back to edit)
-            if (hasTextContent) {
-              setEditorMode("editingContent");
-            } else if (data.headings_confirmed) {
-              setEditorMode("confirmedHeadings");
-            } else {
-              setEditorMode("reviewHeadings");
-            }
-          } else {
-            setEditorMode(null);
-          }
+            if (hasTextContent) setEditorMode("editingContent");
+            else if (data.headings_confirmed) setEditorMode("confirmedHeadings");
+            else setEditorMode("reviewHeadings");
+          } else setEditorMode(null);
         } else {
           setSections([]);
           setEditorMode(null);
         }
-        
-        // Load chat history if available
         if (data.chat_history && Array.isArray(data.chat_history)) {
-          if (data.chat_history.length > 0) {
-            const loadedMessages: ChatMessage[] = data.chat_history.map((msg: ChatHistoryMessage) => ({
-              role: msg.role as "user" | "assistant",
-              text: msg.text,
-              suggestedContent: msg.suggestedContent,
-              requiresConfirmation: msg.requiresConfirmation,
-              messageId: msg.messageId
-            }));
-            setChatMessages(loadedMessages);
-            console.log(`Loaded ${loadedMessages.length} chat messages from history`);
-          } else {
-            // Explicitly set to empty array if chat_history exists but is empty
-            setChatMessages([]);
-            console.log("Chat history exists but is empty");
-          }
-        } else {
-          // No chat_history field - initialize empty
-          setChatMessages([]);
-          console.log("No chat history found in document");
-        }
-        
-        // Mark initial load as complete
+          const loadedMessages: ChatMessage[] = data.chat_history.map((msg: ChatHistoryMessage) => ({
+            role: msg.role as "user" | "assistant",
+            text: msg.text,
+            suggestedContent: msg.suggestedContent,
+            requiresConfirmation: msg.requiresConfirmation,
+            messageId: msg.messageId,
+          }));
+          setChatMessages(loadedMessages.length > 0 ? loadedMessages : []);
+        } else setChatMessages([]);
         isInitialLoad.current = false;
-        
-        // Initialize undo/redo history with loaded sections
         if (loadedSections.length > 0) {
-          setHistoryPast([loadedSections.map(s => ({ ...s }))]);
+          setHistoryPast([loadedSections.map((s) => ({ ...s }))]);
           setHistoryFuture([]);
         }
-        
-        // Fetch company data including processing status
         const companyData = await apiGet<CompanyResponse>(`/companies/${companyIdNum}`);
         setCompanyName(companyData.name || "Company");
         setCompanyProcessingStatus(companyData.processing_status || "pending");
@@ -246,9 +253,11 @@ export default function EditorPage() {
     loadDocument();
   }, [companyIdNum, docType]);
 
-  // Build document API URL with same query params as initial load (funding_program_id, template_id, etc.)
-  // Used when re-fetching document after approve or chat so we get the same document, not another one.
+  // Build document API URL for refetch (e.g. after confirm or chat). Always use by-id once we have documentId.
   function getDocumentApiUrl(): string {
+    if (documentId != null) {
+      return `/documents/by-id/${documentId}`;
+    }
     const urlParams = new URLSearchParams(window.location.search);
     const params = new URLSearchParams();
     const fundingProgramId = urlParams.get("funding_program_id");
