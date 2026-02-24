@@ -10,7 +10,6 @@ from app.jwt_utils import create_access_token, create_password_reset_token, veri
 from datetime import datetime, timedelta
 import logging
 import hashlib
-import posthog
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +52,13 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):  # noqa: B00
         db.commit()
         db.refresh(new_user)
         logger.info(f"New user registered: {new_user.email}")
-        posthog.identify(new_user.email, {"email": new_user.email})
-        posthog.capture(new_user.email, "user_signed_up", {"signup_method": "email"})
+        try:
+            from posthog import new_context, identify_context, capture
+            with new_context():
+                identify_context(new_user.email)
+                capture("user_signed_up", properties={"signup_method": "email"})
+        except Exception as e:
+            logger.debug("PostHog identify/capture skipped: %s", e)
         return AuthResponse(
             success=True,
             message="Account created successfully"
@@ -114,8 +118,13 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):  # noqa: B008
     access_token = create_access_token(data={"email": user.email})
 
     logger.info(f"User logged in successfully: {user.email}")
-    posthog.identify(user.email, {"email": user.email})
-    posthog.capture(user.email, "user_logged_in")
+    try:
+        from posthog import new_context, identify_context, capture
+        with new_context():
+            identify_context(user.email)
+            capture("user_logged_in")
+    except Exception as e:
+        logger.debug("PostHog identify/capture skipped: %s", e)
 
     return TokenResponse(
         access_token=access_token,

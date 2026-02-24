@@ -436,17 +436,20 @@ def create_company_in_program(
         db.commit()
         db.refresh(new_company)
 
-        posthog.capture(
-            current_user.email,
-            "company_created",
-            {
-                "company_id": new_company.id,
-                "company_name": new_company.name,
-                "funding_program_id": funding_program_id,
-                "has_website": bool(new_company.website),
-                "has_audio": bool(new_company.audio_path),
-            },
-        )
+        try:
+            posthog.capture(
+                "company_created",
+                distinct_id=current_user.email,
+                properties={
+                    "company_id": new_company.id,
+                    "company_name": new_company.name,
+                    "funding_program_id": funding_program_id,
+                    "has_website": bool(new_company.website),
+                    "has_audio": bool(new_company.audio_path),
+                },
+            )
+        except Exception as e:
+            logger.debug("PostHog capture skipped: %s", e)
 
         # Schedule background processing
         if new_company.website or new_company.audio_path:
@@ -555,16 +558,19 @@ def create_company(
         db.commit()
         db.refresh(new_company)
 
-        posthog.capture(
-            current_user.email,
-            "company_created",
-            {
-                "company_id": new_company.id,
-                "company_name": new_company.name,
-                "has_website": bool(new_company.website),
-                "has_audio": bool(new_company.audio_path),
-            },
-        )
+        try:
+            posthog.capture(
+                "company_created",
+                distinct_id=current_user.email,
+                properties={
+                    "company_id": new_company.id,
+                    "company_name": new_company.name,
+                    "has_website": bool(new_company.website),
+                    "has_audio": bool(new_company.audio_path),
+                },
+            )
+        except Exception as e:
+            logger.debug("PostHog capture skipped: %s", e)
 
         # Schedule background processing
         if new_company.website or new_company.audio_path:
@@ -749,11 +755,14 @@ def delete_company(
         # Delete the company itself
         db.delete(company)
         db.commit()
-        posthog.capture(
-            current_user.email,
-            "company_deleted",
-            {"company_id": company_id},
-        )
+        try:
+            posthog.capture(
+                "company_deleted",
+                distinct_id=current_user.email,
+                properties={"company_id": company_id},
+            )
+        except Exception as e:
+            logger.debug("PostHog capture skipped: %s", e)
         return None
     except Exception as e:
         db.rollback()
