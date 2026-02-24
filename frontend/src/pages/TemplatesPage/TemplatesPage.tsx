@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
 import { apiGet, apiDelete } from "../../utils/api";
+import { devIngest } from "../../utils/debugLog";
 import styles from "./TemplatesPage.module.css";
 
 type SystemTemplate = {
@@ -18,8 +19,8 @@ type UserTemplate = {
 };
 
 export default function TemplatesPage() {
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:25',message:'TemplatesPage component rendering',data:{},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+  // #region agent log (dev only - no ingest in production)
+  devIngest({ location: "TemplatesPage.tsx:25", message: "TemplatesPage component rendering", data: {}, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
   // #endregion
 
   const navigate = useNavigate();
@@ -33,8 +34,8 @@ export default function TemplatesPage() {
 
   // Fetch templates
   useEffect(() => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:40',message:'Fetching templates',data:{},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+    // #region agent log (dev only)
+    devIngest({ location: "TemplatesPage.tsx:40", message: "Fetching templates", data: {}, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
     // #endregion
 
     async function fetchTemplates() {
@@ -45,16 +46,16 @@ export default function TemplatesPage() {
           user: Array<{ id: string; name: string; source: string; description?: string }>;
         }>("/templates/list");
 
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:52',message:'Templates fetched',data:{systemCount:response.system?.length||0,userCount:response.user?.length||0},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+        // #region agent log (dev only)
+        devIngest({ location: "TemplatesPage.tsx:52", message: "Templates fetched", data: { systemCount: response.system?.length || 0, userCount: response.user?.length || 0 }, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
         // #endregion
 
         setSystemTemplates((response.system || []) as SystemTemplate[]);
         setUserTemplates((response.user || []) as UserTemplate[]);
       } catch (error: unknown) {
         console.error("Error fetching templates:", error);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:60',message:'Error fetching templates',data:{error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+        // #region agent log (dev only)
+        devIngest({ location: "TemplatesPage.tsx:60", message: "Error fetching templates", data: { error: error instanceof Error ? error.message : String(error) }, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
         // #endregion
         if (error instanceof Error && error.message.includes("Authentication required")) {
           logout();
@@ -84,8 +85,8 @@ export default function TemplatesPage() {
 
   // Copy template content
   async function handleCopyContent(template: SystemTemplate | UserTemplate) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:85',message:'Copying template content',data:{templateId:template.id,source:template.source},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+    // #region agent log (dev only)
+    devIngest({ location: "TemplatesPage.tsx:85", message: "Copying template content", data: { templateId: template.id, source: template.source }, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
     // #endregion
 
     try {
@@ -114,8 +115,8 @@ export default function TemplatesPage() {
       alert("Template content copied to clipboard!");
     } catch (error: unknown) {
       console.error("Error copying template:", error);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:110',message:'Error copying template',data:{error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+      // #region agent log (dev only)
+      devIngest({ location: "TemplatesPage.tsx:110", message: "Error copying template", data: { error: error instanceof Error ? error.message : String(error) }, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
       // #endregion
       alert(error instanceof Error ? error.message : "Failed to copy template content");
     }
@@ -141,8 +142,8 @@ export default function TemplatesPage() {
     }
   }
 
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/b9f8d913-3377-4ae3-a275-a5c009f021ec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TemplatesPage.tsx:135',message:'Rendering TemplatesPage',data:{systemCount:systemTemplates.length,userCount:userTemplates.length,isLoading},timestamp:Date.now(),runId:'initial',hypothesisId:'A'})}).catch(()=>{});
+  // #region agent log (dev only)
+  devIngest({ location: "TemplatesPage.tsx:135", message: "Rendering TemplatesPage", data: { systemCount: systemTemplates.length, userCount: userTemplates.length, isLoading }, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
   // #endregion
 
   return (

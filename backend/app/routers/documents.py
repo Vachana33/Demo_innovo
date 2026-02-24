@@ -142,6 +142,10 @@ def get_document(
     Supports legacy documents (funding_program_id=NULL) for backward compatibility.
     Currently only supports "vorhabensbeschreibung".
     """
+    # Normalize optional query params (empty string -> None so template lookup is safe)
+    template_id = (template_id.strip() if isinstance(template_id, str) else None) or None
+    template_name = (template_name.strip() if isinstance(template_name, str) else None) or None
+
     # Verify company exists and belongs to current user
     company = db.query(Company).filter(
         Company.id == company_id,
@@ -204,14 +208,16 @@ def get_document(
                         legacy_doc.funding_program_id = funding_program_id
 
                         # Check if document needs template structure (empty or old structure)
-                        existing_sections = legacy_doc.content_json.get("sections", [])
+                        content_json = getattr(legacy_doc, "content_json", None)
+                        content_json = content_json if isinstance(content_json, dict) else {}
+                        existing_sections = content_json.get("sections", [])
                         needs_template = len(existing_sections) == 0 or len(existing_sections) < 20
 
                         if needs_template:
                             # Populate with template structure using document's template
                             try:
                                 template = get_template_for_document(legacy_doc, db, current_user.email)
-                                sections = template.get("sections", [])
+                                sections = (template.get("sections", []) if isinstance(template, dict) and template else [])
 
                                 # Initialize milestone table for section 4.1 if present
                                 for section in sections:
@@ -257,19 +263,19 @@ def get_document(
             # Determine template_id and template_name from query parameters
             doc_template_id = None
             doc_template_name = None
-            
-            if template_id:
+
+            if template_id and str(template_id).strip():
                 # User template selected
                 try:
                     import uuid
                     doc_template_id = uuid.UUID(template_id)
                     logger.info(f"[TEMPLATE RESOLVER] Creating document with user template_id: {template_id}")
-                except ValueError:
+                except (ValueError, TypeError):
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"Invalid template_id format: {template_id}"
                     )
-            elif template_name:
+            elif template_name and str(template_name).strip():
                 # System template selected
                 doc_template_name = template_name
                 logger.info(f"[TEMPLATE RESOLVER] Creating document with system template_name: {template_name}")
@@ -290,17 +296,23 @@ def get_document(
                 logger.error(f"[TEMPLATE RESOLVER] Failed to resolve template: {str(e)}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Template resolution failed: {str(e)}"
+                    detail=f"Template not found or invalid: {str(e)}"
                 ) from None
             except Exception as e:
                 logger.error(f"[TEMPLATE RESOLVER] Unexpected error resolving template: {str(e)}", exc_info=True)
                 raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Template resolution error: {str(e)}"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Template not found or invalid: {str(e)}"
                 ) from e
-            
+
+            if not template or not isinstance(template, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Template not found"
+                )
+
             # Convert template to document sections format
-            sections = template.get("sections", [])
+            sections = template.get("sections", []) if isinstance(template.get("sections"), list) else []
 
             # Initialize milestone table for section 4.1 if present
             for section in sections:
@@ -576,6 +588,13 @@ def get_document(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail=f"Failed to create document: {str(e)}"
                     ) from e
+
+    # Ensure document was resolved or created
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
 
     # Ensure chat_history is initialized if null
     # Handle case where column might not exist yet (migration not run)
