@@ -282,15 +282,6 @@ export default function TemplatesPage() {
                   )}
                 </div>
               </div>
-              <div className={styles.cardActions}>
-                <button
-                  onClick={() => handleCopyContent(template)}
-                  className={styles.copyButton}
-                >
-                  <span className={styles.copyIcon}>📋</span>
-                  Copy Content
-                </button>
-              </div>
             </div>
           ))}
 
