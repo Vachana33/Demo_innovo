@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
-import { apiGet, apiDelete } from "../../utils/api";
+import { apiGet, apiPost, apiDelete } from "../../utils/api";
 import { devIngest } from "../../utils/debugLog";
 import styles from "./TemplatesPage.module.css";
 
@@ -31,41 +31,45 @@ export default function TemplatesPage() {
   const [userTemplates, setUserTemplates] = useState<UserTemplate[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [isDuplicating, setIsDuplicating] = useState(false);
 
-  // Fetch templates
-  useEffect(() => {
-    // #region agent log (dev only)
-    devIngest({ location: "TemplatesPage.tsx:40", message: "Fetching templates", data: {}, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
-    // #endregion
-
-    async function fetchTemplates() {
-      try {
-        setIsLoading(true);
-        const response = await apiGet<{
-          system: Array<{ id: string; name: string; source: string }>;
-          user: Array<{ id: string; name: string; source: string; description?: string }>;
-        }>("/templates/list");
-
-        // #region agent log (dev only)
-        devIngest({ location: "TemplatesPage.tsx:52", message: "Templates fetched", data: { systemCount: response.system?.length || 0, userCount: response.user?.length || 0 }, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
-        // #endregion
-
-        setSystemTemplates((response.system || []) as SystemTemplate[]);
-        setUserTemplates((response.user || []) as UserTemplate[]);
-      } catch (error: unknown) {
-        console.error("Error fetching templates:", error);
-        // #region agent log (dev only)
-        devIngest({ location: "TemplatesPage.tsx:60", message: "Error fetching templates", data: { error: error instanceof Error ? error.message : String(error) }, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
-        // #endregion
-        if (error instanceof Error && error.message.includes("Authentication required")) {
-          logout();
-        }
-      } finally {
-        setIsLoading(false);
+  async function fetchTemplates() {
+    try {
+      setIsLoading(true);
+      const response = await apiGet<{
+        system: Array<{ id: string; name: string; source: string }>;
+        user: Array<{ id: string; name: string; source: string; description?: string }>;
+      }>("/templates/list");
+      setSystemTemplates((response.system || []) as SystemTemplate[]);
+      setUserTemplates((response.user || []) as UserTemplate[]);
+    } catch (error: unknown) {
+      console.error("Error fetching templates:", error);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
+        logout();
       }
+    } finally {
+      setIsLoading(false);
     }
+  }
+
+  // Fetch templates on mount
+  useEffect(() => {
     fetchTemplates();
   }, [logout]);
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside() {
+      if (openMenuId !== null) {
+        setOpenMenuId(null);
+      }
+    }
+    if (openMenuId !== null) {
+      document.addEventListener("click", handleClickOutside);
+      return () => document.removeEventListener("click", handleClickOutside);
+    }
+  }, [openMenuId]);
 
   // Filter templates
   const filteredSystemTemplates = systemTemplates.filter((t) => {
@@ -119,6 +123,28 @@ export default function TemplatesPage() {
       devIngest({ location: "TemplatesPage.tsx:110", message: "Error copying template", data: { error: error instanceof Error ? error.message : String(error) }, timestamp: Date.now(), runId: "initial", hypothesisId: "A" });
       // #endregion
       alert(error instanceof Error ? error.message : "Failed to copy template content");
+    }
+  }
+
+  // Duplicate user template
+  async function handleDuplicate(templateId: string) {
+    setIsDuplicating(true);
+    setOpenMenuId(null);
+    try {
+      await apiPost<{ id: string; name: string }>(`/user-templates/duplicate/${templateId}`);
+      await fetchTemplates();
+    } catch (error: unknown) {
+      console.error("Error duplicating template:", error);
+      const message =
+        error && typeof error === "object" && "message" in error
+          ? String((error as { message?: string }).message)
+          : "Failed to duplicate template";
+      alert(message);
+      if (error instanceof Error && error.message.includes("Authentication required")) {
+        logout();
+      }
+    } finally {
+      setIsDuplicating(false);
     }
   }
 
@@ -210,27 +236,59 @@ export default function TemplatesPage() {
                     <p className={styles.cardDescription}>{template.description}</p>
                   )}
                 </div>
+                <div className={styles.cardActions}>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenMenuId(openMenuId === template.id ? null : template.id);
+                    }}
+                    className={styles.menuButton}
+                    title="More options"
+                    disabled={isDuplicating}
+                  >
+                    ⋮
+                  </button>
+                  {openMenuId === template.id && (
+                    <div className={styles.menuDropdown} onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        className={styles.menuItem}
+                        onClick={() => {
+                          setOpenMenuId(null);
+                          navigate(`/templates/${template.id}/edit`);
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.menuItem}
+                        onClick={() => handleDuplicate(template.id)}
+                      >
+                        Duplicate
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.menuItem}
+                        onClick={() => {
+                          setDeletingId(template.id);
+                          setOpenMenuId(null);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
               <div className={styles.cardActions}>
-                <button
-                  onClick={() => navigate(`/templates/${template.id}/edit`)}
-                  className={styles.editButton}
-                >
-                  ✏️ Edit
-                </button>
                 <button
                   onClick={() => handleCopyContent(template)}
                   className={styles.copyButton}
                 >
                   <span className={styles.copyIcon}>📋</span>
                   Copy Content
-                </button>
-                <button
-                  onClick={() => setDeletingId(template.id)}
-                  className={styles.deleteButton}
-                  title="Delete"
-                >
-                  🗑️
                 </button>
               </div>
             </div>

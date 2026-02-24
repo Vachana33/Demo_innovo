@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.models import User, FundingProgram, UserTemplate
+from app.models import User, FundingProgram, UserTemplate, Document
 from app.templates import get_template
 from app.schemas import UserTemplateCreate, UserTemplateUpdate, UserTemplateResponse
 from sqlalchemy.orm.attributes import flag_modified
@@ -285,13 +285,13 @@ def update_user_template(
         ) from e
 
 
-@router.delete("/user-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_user_template(
+@router.post("/user-templates/duplicate/{template_id}", response_model=UserTemplateResponse, status_code=status.HTTP_201_CREATED)
+def duplicate_user_template(
     template_id: str,
     db: Session = Depends(get_db),  # noqa: B008
     current_user: User = Depends(get_current_user)  # noqa: B008
 ):
-    """Delete a user-defined template."""
+    """Duplicate a user-defined template. Creates a new template with same sections and name suffixed by ' (Copy)'."""
     try:
         template_uuid = uuid.UUID(template_id)
     except ValueError:
@@ -309,6 +309,72 @@ def delete_user_template(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Template not found"
+        )
+
+    new_name = (template.name or "Template").strip() + " (Copy)"
+    new_template = UserTemplate(
+        name=new_name,
+        description=template.description,
+        template_structure=dict(template.template_structure) if template.template_structure else {"sections": []},
+        user_email=current_user.email
+    )
+
+    try:
+        db.add(new_template)
+        db.commit()
+        db.refresh(new_template)
+        logger.info(
+            f"Duplicated user template '{template.name}' -> '{new_name}' (ID: {new_template.id}) for user {current_user.email}"
+        )
+        return UserTemplateResponse(
+            id=str(new_template.id),
+            name=new_template.name,
+            description=new_template.description,
+            template_structure=new_template.template_structure,
+            created_at=new_template.created_at,
+            updated_at=new_template.updated_at
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to duplicate user template: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to duplicate template"
+        ) from e
+
+
+@router.delete("/user-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user_template(
+    template_id: str,
+    db: Session = Depends(get_db),  # noqa: B008
+    current_user: User = Depends(get_current_user)  # noqa: B008
+):
+    """Delete a user-defined template. Blocked if any document references this template."""
+    try:
+        template_uuid = uuid.UUID(template_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid template ID format"
+        ) from None
+
+    template = db.query(UserTemplate).filter(
+        UserTemplate.id == template_uuid,
+        UserTemplate.user_email == current_user.email
+    ).first()
+
+    if not template:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Template not found"
+        )
+
+    # Block deletion if any document references this template (would break document loading)
+    ref_count = db.query(Document).filter(Document.template_id == template_uuid).count()
+    if ref_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete template: {ref_count} document(s) use this template. Remove or reassign those documents first."
         )
 
     try:
