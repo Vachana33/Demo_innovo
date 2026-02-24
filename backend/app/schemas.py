@@ -116,6 +116,14 @@ class DocumentResponse(BaseModel):
     template_name: Optional[str] = None  # System template name
     updated_at: datetime
 
+    @field_validator("template_id", mode="before")
+    @classmethod
+    def coerce_template_id_to_str(cls, v: object) -> Optional[str]:
+        """Coerce UUID to str when returning from ORM (user templates). Leaves None unchanged (system templates)."""
+        if v is None:
+            return None
+        return str(v)
+
     class Config:
         from_attributes = True
 
