@@ -27,7 +27,7 @@ jobs:
 
     env:
       # Shared DB URL for backend + migrations
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/innovo_test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/innovo_test?sslmode=disable
       JWT_SECRET_KEY: ci-secret
 
       # E2E credentials from GitHub Secrets
