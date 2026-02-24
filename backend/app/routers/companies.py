@@ -18,6 +18,7 @@ from typing import List
 from datetime import datetime, timezone
 import logging
 import os
+import posthog
 
 from pathlib import Path
 
@@ -435,6 +436,18 @@ def create_company_in_program(
         db.commit()
         db.refresh(new_company)
 
+        posthog.capture(
+            current_user.email,
+            "company_created",
+            {
+                "company_id": new_company.id,
+                "company_name": new_company.name,
+                "funding_program_id": funding_program_id,
+                "has_website": bool(new_company.website),
+                "has_audio": bool(new_company.audio_path),
+            },
+        )
+
         # Schedule background processing
         if new_company.website or new_company.audio_path:
             background_tasks.add_task(
@@ -541,6 +554,17 @@ def create_company(
         db.add(new_company)
         db.commit()
         db.refresh(new_company)
+
+        posthog.capture(
+            current_user.email,
+            "company_created",
+            {
+                "company_id": new_company.id,
+                "company_name": new_company.name,
+                "has_website": bool(new_company.website),
+                "has_audio": bool(new_company.audio_path),
+            },
+        )
 
         # Schedule background processing
         if new_company.website or new_company.audio_path:
@@ -725,6 +749,11 @@ def delete_company(
         # Delete the company itself
         db.delete(company)
         db.commit()
+        posthog.capture(
+            current_user.email,
+            "company_deleted",
+            {"company_id": company_id},
+        )
         return None
     except Exception as e:
         db.rollback()

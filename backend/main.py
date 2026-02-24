@@ -1,6 +1,7 @@
 # Standard library imports
 import os
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -46,6 +47,7 @@ from fastapi.exceptions import RequestValidationError  # noqa: E402
 from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 from app.database import engine, Base  # noqa: E402
 from app.routers import auth, funding_programs, companies, documents, templates, alte_vorhabensbeschreibung  # noqa: E402
+from app.posthog_client import init_posthog, shutdown_posthog  # noqa: E402
 
 # Create database tables
 # Note: In production (PostgreSQL on Render), use Alembic migrations instead
@@ -62,7 +64,15 @@ else:
     # In production (PostgreSQL), rely on Alembic migrations only
     logger.info("Skipping automatic table creation (PostgreSQL - use Alembic migrations)")
 
-app = FastAPI(title="Innovo Agent API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: initialize and cleanly shut down PostHog."""
+    init_posthog()
+    yield
+    shutdown_posthog()
+
+
+app = FastAPI(title="Innovo Agent API", version="1.0.0", lifespan=lifespan)
 
 # CORS configuration - environment-driven
 # Production: Set FRONTEND_ORIGIN environment variable to your frontend URL (e.g., https://demo-innovo-frontend.onrender.com)

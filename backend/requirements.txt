@@ -22,4 +22,5 @@ PyPDF2>=3.0.0,<4.0.0
 # OpenAI SDK 1.54.0 passes 'proxies' kwarg to httpx.Client, which was removed in httpx 0.28.0+
 httpx==0.27.2
 supabase>=2.27.2
+posthog>=3.0.0
 

@@ -12,6 +12,7 @@ from app.processing_cache import get_cached_document_text
 from app.funding_program_documents import detect_category_from_filename, validate_category, get_file_type_from_filename, is_text_file
 from typing import List, Optional
 import logging
+import posthog
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,15 @@ def create_funding_program(
         db.commit()
         db.refresh(new_program)
 
+        posthog.capture(
+            current_user.email,
+            "funding_program_created",
+            {
+                "funding_program_id": new_program.id,
+                "title": new_program.title,
+                "has_website": bool(new_program.website),
+            },
+        )
         return new_program
     except Exception as e:
         db.rollback()
@@ -209,6 +219,11 @@ def delete_funding_program(
         # #region agent log
         logger.info(f"[DELETE] Successfully deleted funding_program_id={funding_program_id}")
         # #endregion
+        posthog.capture(
+            current_user.email,
+            "funding_program_deleted",
+            {"funding_program_id": funding_program_id},
+        )
         return None
     except Exception as e:
         # #region agent log
